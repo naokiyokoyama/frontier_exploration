@@ -1,2 +1,2 @@
-import frontier_exploration1.explorer  # necessary for updating registry!!
-import frontier_exploration1.measurements  # necessary for updating registry!!
+import frontier_exploration.explorer  # necessary for updating registry!!
+import frontier_exploration.sensors  # necessary for updating registry!!
