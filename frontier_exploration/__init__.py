@@ -1,2 +1,4 @@
-import frontier_exploration.explorer  # necessary for updating registry!!
-import frontier_exploration.sensors  # necessary for updating registry!!
+"""The following imports are necessary for updating the registry"""
+import frontier_exploration.explorer
+import frontier_exploration.policy
+import frontier_exploration.sensors
