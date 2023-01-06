@@ -1,11 +1,21 @@
-from typing import List, Optional
+from typing import Optional
 
 import cv2
 import numpy as np
 
 
-def detect_frontiers(
+def detect_frontier_waypoints(
     full_map: np.ndarray, explored_map: np.ndarray, area_thresh: Optional[int] = -1
+):
+    mask = detect_frontiers(full_map, explored_map, area_thresh)
+    return frontier_waypoints(mask)
+
+
+def detect_frontiers(
+    full_map: np.ndarray,
+    explored_map: np.ndarray,
+    area_thresh: Optional[int] = -1,
+    whiten: Optional[bool] = True,
 ) -> np.ndarray:
     """Detects frontiers in a map.
 
@@ -20,15 +30,23 @@ def detect_frontiers(
     Returns:
         np.ndarray: A mono-channel mask where white contours represent each frontier.
     """
+    if whiten:
+        use_full_map, use_explored_map = [
+            np.where(i > 0, 255, i) for i in (full_map, explored_map)
+        ]
+    else:
+        use_full_map, use_explored_map = full_map, explored_map
     if area_thresh != -1:
-        filter_out_small_unexplored(full_map, explored_map, area_thresh)
+        use_explored_map = filter_out_small_unexplored(
+            use_full_map, use_explored_map, area_thresh
+        )
 
     # Blur the full_map with a kernel of 3
-    blurred_map = cv2.blur(explored_map, (3, 3))
+    blurred_map = cv2.blur(use_explored_map, (3, 3))
     # Threshold the blurred map to get a binary image
     _, blurred_map = cv2.threshold(blurred_map, 0, 255, cv2.THRESH_BINARY)
     # Make a three channel image by stacking all images
-    stacks = np.stack((full_map, explored_map, blurred_map), axis=2)
+    stacks = np.stack((use_full_map, use_explored_map, blurred_map), axis=2)
     # Make a single-channel mask where pixels are white if they are:
     # 1). navigable (white in full_map);
     # 2). unexplored (black in explored_map), but also;
@@ -41,7 +59,8 @@ def detect_frontiers(
 def filter_out_small_unexplored(
     full_map: np.ndarray, explored_map: np.ndarray, area_thresh: int
 ):
-    """Edit the explored map to add small unexplored areas"""
+    """Edit the explored map to add small unexplored areas, which ignores their
+    frontiers."""
     # Make mask of unexplored areas
     stacks = np.stack((full_map, explored_map), axis=2)
     unexplored_mask = np.all(stacks == [255, 0], axis=2).astype(np.uint8) * 255
@@ -50,12 +69,14 @@ def filter_out_small_unexplored(
         unexplored_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
     # Add small unexplored areas to the explored map
+    new_explored_map = explored_map.copy()
     for contour in contours:
         if cv2.contourArea(contour) < area_thresh:
-            cv2.drawContours(explored_map, [contour], -1, 255, -1)
+            cv2.drawContours(new_explored_map, [contour], -1, 255, -1)
+    return new_explored_map
 
 
-def frontier_waypoints(frontier_mask: np.ndarray) -> List[np.ndarray]:
+def frontier_waypoints(frontier_mask: np.ndarray) -> np.ndarray:
     """Finds waypoints in a frontier mask.
 
     Args:
@@ -63,21 +84,35 @@ def frontier_waypoints(frontier_mask: np.ndarray) -> List[np.ndarray]:
         each frontier.
 
     Returns:
-        np.ndarray: A list of waypoints in the frontier mask.
+        np.ndarray: An array of waypoints, where each waypoint is an array of (x, y)
     """
     # Find contours in the frontier mask
     contours, _ = cv2.findContours(
         frontier_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
-    # Find the center of each contour
-    waypoints = []
-    for contour in contours:
-        moments = cv2.moments(contour)
-        if moments["m00"] != 0:
-            x = int(moments["m10"] / moments["m00"])
-            y = int(moments["m01"] / moments["m00"])
-            waypoints.append(np.array([x, y]))
-    return waypoints
+    return np.array([find_center_of_contour(contour) for contour in contours])
+
+
+def find_center_of_contour(contour):
+    moments = cv2.moments(contour)
+    center_x = int(moments["m10"] / moments["m00"])
+    center_y = int(moments["m01"] / moments["m00"])
+
+    # Check if the center point is within the contour
+    if cv2.pointPolygonTest(contour, (center_x, center_y), False) >= 0:
+        return center_x, center_y
+
+    # Initialize variables to store the nearest point and minimum distance
+    nearest_point = None
+    min_distance = float("inf")
+
+    for point in contour:
+        # Find the distance between the center point and the current point
+        distance = ((center_x - point[0][0]) ** 2) + ((center_y - point[0][1]) ** 2)
+        if distance < min_distance:
+            min_distance = distance
+            nearest_point = point[0]
+    return nearest_point
 
 
 if __name__ == "__main__":
