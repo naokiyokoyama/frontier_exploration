@@ -1,3 +1,4 @@
+import torch
 from gym import spaces
 from habitat_baselines.common.baseline_registry import baseline_registry
 from habitat_baselines.rl.ppo import Policy
@@ -9,6 +10,10 @@ from frontier_exploration.sensors import FrontierWaypoint
 class FrontierExplorationPolicy(Policy):
     def __init__(self, *args, **kwargs):
         super().__init__()
+
+    @property
+    def should_load_agent_state(self):
+        return False
 
     @classmethod
     def from_config(
@@ -28,7 +33,8 @@ class FrontierExplorationPolicy(Policy):
         masks,
         deterministic=False,
     ):
-        return observations[FrontierWaypoint.cls_uuid]
+        action = torch.tensor(observations[FrontierWaypoint.cls_uuid], dtype=torch.long)
+        return None, action, None, rnn_hidden_states
 
     # used in ppo_trainer.py eval:
 
