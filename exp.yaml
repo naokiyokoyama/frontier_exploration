@@ -3,11 +3,16 @@
 defaults:
   - /benchmark/nav/pointnav: pointnav_gibson
   - /habitat_baselines: habitat_baselines_rl_config_base
+  - /habitat/task/measurements:
+    - frontier_exploration_map
+  - override /habitat/task/lab_sensors:
+      - pointgoal_with_gps_compass_sensor
+      - frontier_waypoint
   - _self_
 
 habitat_baselines:
   verbose: False
-  trainer_name: "ddppo"
+  trainer_name: "nonlearned_policy"
   torch_gpu_id: 0
   tensorboard_dir: "tb"
   video_dir: "video_dir"
@@ -25,7 +30,7 @@ habitat_baselines:
 
   rl:
     policy:
-      name: "PointNavResNetPolicy"
+      name: "FrontierExplorationPolicy"
 
     ppo:
       # ppo params
@@ -67,7 +72,7 @@ habitat_baselines:
       # Whether the visual encoder backbone will be trained.
       train_encoder: True
       # Whether to reset the critic linear layer
-      reset_critic: True
+      reset_critic: False
 
       # Model parameters
       backbone: resnet50
