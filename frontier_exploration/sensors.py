@@ -115,6 +115,28 @@ class FrontierWaypoint(Sensor):
             return None
         return next_waypoint
 
+    def _get_closest_waypoint(
+        self, waypoints: np.ndarray, agent_position: np.ndarray
+    ) -> np.ndarray:
+        """A* search to find the closest (geodesic) waypoint to the agent."""
+        x0, y0 = agent_position
+        euclidean_distances = np.linalg.norm(waypoints - [x0, y0], axis=1)
+        sorted_waypoints = waypoints[np.argsort(euclidean_distances)]
+        euclidean_distances.sort()
+
+        agent_position = self._sim.get_agent_state().position
+        min_dist = np.inf
+        closest_waypoint = None
+        for waypoint, heuristic in zip(sorted_waypoints, euclidean_distances):
+            if heuristic > min_dist:
+                break
+            sim_waypoint = self._pixel_to_map_coors(waypoint)
+            dist = self._sim.geodesic_distance(agent_position, sim_waypoint)
+            if dist < min_dist:
+                min_dist = dist
+                closest_waypoint = waypoint
+        return closest_waypoint
+
     def _decide_action(self, next_waypoint: np.ndarray) -> np.ndarray:
         if next_waypoint is None:
             return np.array([STOP], dtype=np.int)
@@ -177,28 +199,6 @@ class FrontierWaypoint(Sensor):
             [realworld_y, self._sim.get_agent_state().position[1], realworld_x]
         )
 
-    def _get_closest_waypoint(
-        self, waypoints: np.ndarray, agent_position: np.ndarray
-    ) -> np.ndarray:
-        """A* search to find the closest (geodesic) waypoint to the agent."""
-        x0, y0 = agent_position
-        euclidean_distances = np.linalg.norm(waypoints - [x0, y0], axis=1)
-        sorted_waypoints = waypoints[np.argsort(euclidean_distances)]
-        euclidean_distances.sort()
-
-        agent_position = self._sim.get_agent_state().position
-        min_dist = np.inf
-        closest_waypoint = None
-        for waypoint, heuristic in zip(sorted_waypoints, euclidean_distances):
-            if heuristic > min_dist:
-                break
-            sim_waypoint = self._pixel_to_map_coors(waypoint)
-            dist = self._sim.geodesic_distance(agent_position, sim_waypoint)
-            if dist < min_dist:
-                min_dist = dist
-                closest_waypoint = waypoint
-        return closest_waypoint
-
 
 def wrap_heading(heading):
     """Ensures input heading is between -180 an 180; can be float or np.ndarray"""
@@ -210,7 +210,7 @@ class FrontierWaypointSensorConfig(LabSensorConfig):
     type: str = FrontierWaypoint.__name__
     # minimum unexplored area (in meters) needed adjacent to a frontier for that
     # frontier to be valid
-    area_thresh: float = 1.5  # square meters
+    area_thresh: float = 3.0  # square meters
     forward_step_size: float = 0.25  # meters
     fov: int = 90
     map_resolution: int = 1024
