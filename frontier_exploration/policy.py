@@ -33,7 +33,8 @@ class FrontierExplorationPolicy(Policy):
         masks,
         deterministic=False,
     ):
-        action = torch.tensor(observations[FrontierWaypoint.cls_uuid], dtype=torch.long)
+        # Convert obs to torch.long
+        action = observations[FrontierWaypoint.cls_uuid].type(torch.long)
         return None, action, None, rnn_hidden_states
 
     # used in ppo_trainer.py eval:
