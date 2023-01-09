@@ -45,7 +45,7 @@ class FrontierExplorationMap(TopDownMap):
                 color = (255, 0, 0)
             else:
                 color = (0, 0, 255)
-            cv2.circle(new_map, waypoint, 4, color, -1)
+            cv2.circle(new_map, waypoint[::-1].astype(np.int), 20, color, -1)
         self._metric["map"] = new_map
 
 
