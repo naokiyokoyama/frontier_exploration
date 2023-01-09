@@ -42,10 +42,10 @@ class FrontierExplorationMap(TopDownMap):
             if np.allclose(
                 waypoint, self._frontier_exploration_sensor.closest_frontier_waypoint
             ):
-                color = (255, 0, 0)
+                color, size = (255, 0, 0), 30
             else:
-                color = (0, 0, 255)
-            cv2.circle(new_map, waypoint[::-1].astype(np.int), 20, color, -1)
+                color, size = (0, 255, 255), 20
+            cv2.circle(new_map, waypoint[::-1].astype(np.int), size, color, -1)
         self._metric["map"] = new_map
 
 
