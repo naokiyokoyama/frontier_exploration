@@ -183,6 +183,14 @@ if __name__ == "__main__":
         type=float,
         default=-1,
     )
+    parser.add_argument(
+        "-n",
+        "--num-iterations",
+        help="Number of iterations to run the algorithm for timing purposes. Set to"
+        "0 for no timing",
+        type=int,
+        default=500,
+    )
     args = parser.parse_args()
 
     # Read in the map
@@ -190,12 +198,16 @@ if __name__ == "__main__":
     # Read in the explored map
     explored_mask = cv2.imread(args.explored_mask, 0)
     times = []
-    for _ in range(501):
+    for _ in range(args.num_iterations + 1):
         start_time = time.time()
         waypoints = detect_frontier_waypoints(full_map, explored_mask, args.area_thresh)
         times.append(time.time() - start_time)
-    # Skip first run as it's slower due to JIT compilation
-    print("Avg. time taken for algorithm over 500 runs:", np.mean(times[1:]))
+    if args.num_iterations > 0:
+        # Skip first run as it's slower due to JIT compilation
+        print(
+            f"Avg. time taken for algorithm over {args.num_iterarions} runs:",
+            np.mean(times[1:]),
+        )
 
     # Plot the results
     plt.figure(figsize=(10, 10))
