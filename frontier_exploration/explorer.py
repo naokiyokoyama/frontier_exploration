@@ -37,12 +37,15 @@ def detect_frontiers(
         np.ndarray: A mono-channel mask where white contours represent each frontier.
     """
     # Find the contour of the explored area
+    filtered_explored_mask = filter_out_small_unexplored(
+        full_map, explored_mask, area_thresh
+    )
     contours, _ = cv2.findContours(
-        filter_out_small_unexplored(full_map, explored_mask, area_thresh),
+        filtered_explored_mask,
         cv2.RETR_EXTERNAL,
         cv2.CHAIN_APPROX_SIMPLE,
     )
-    unexplored_mask = np.where(explored_mask > 0, 0, full_map)
+    unexplored_mask = np.where(filtered_explored_mask > 0, 0, full_map)
     unexplored_mask = cv2.blur(  # blurring for some leeway
         np.where(unexplored_mask > 0, 255, unexplored_mask), (3, 3)
     )
