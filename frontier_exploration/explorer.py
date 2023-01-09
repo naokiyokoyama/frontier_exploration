@@ -8,10 +8,13 @@ from frontier_exploration.utils import closest_line_segment
 
 
 def detect_frontier_waypoints(
-    full_map: np.ndarray, explored_mask: np.ndarray, area_thresh: Optional[int] = -1
+    full_map: np.ndarray,
+    explored_mask: np.ndarray,
+    area_thresh: Optional[int] = -1,
+    xy: Optional[np.ndarray] = None,
 ):
     frontiers = detect_frontiers(full_map, explored_mask, area_thresh)
-    waypoints = frontier_waypoints(frontiers)
+    waypoints = frontier_waypoints(frontiers, xy)
     return waypoints
 
 
@@ -78,13 +81,18 @@ def contour_to_frontiers(contour, unexplored_mask):
     value of 0 in the unexplored mask. This function will split the contour into
     multiple arrays"""
     bad_inds = []
-    for idx in range(len(contour)):
+    num_contours = len(contour)
+    for idx in range(num_contours):
         point = contour[idx][0]
         x, y = point
         if unexplored_mask[y, x] == 0:
             bad_inds.append(idx)
     frontiers = np.split(contour, bad_inds)
     frontiers = [i for i in frontiers if len(i) > 1]
+    # Combine the first and last frontier if adjacent (no bad points in between them)
+    if not (0 in bad_inds or num_contours - 1 in bad_inds):
+        last_frontier = frontiers.pop()
+        frontiers[0] = np.concatenate((last_frontier, frontiers[0]))
     return frontiers
 
 
@@ -186,8 +194,8 @@ if __name__ == "__main__":
         start_time = time.time()
         waypoints = detect_frontier_waypoints(full_map, explored_mask, args.area_thresh)
         times.append(time.time() - start_time)
-    # Skip first run as it's slower
-    print("Avg. time taken for algorithm:", np.mean(times[1:]))
+    # Skip first run as it's slower due to JIT compilation
+    print("Avg. time taken for algorithm over 500 runs:", np.mean(times[1:]))
 
     # Plot the results
     plt.figure(figsize=(10, 10))
