@@ -89,12 +89,21 @@ def contour_to_frontiers(contour, unexplored_mask):
         if unexplored_mask[y, x] == 0:
             bad_inds.append(idx)
     frontiers = np.split(contour, bad_inds)
-    frontiers = [i for i in frontiers if len(i) > 1]
+    # np.split is fast but does NOT remove the element at the split index, so we need to
+    # remove the first element of each array after the first array. Filter out arrays
+    # that only have one point (i.e., just containing a split element).
+    filtered_frontiers = []
+    for idx, f in enumerate(frontiers):
+        if len(f) > 1:
+            if idx == 0:
+                filtered_frontiers.append(f)
+            else:
+                filtered_frontiers.append(f[1:])
     # Combine the first and last frontier if adjacent (no bad points in between them)
     if not (0 in bad_inds or num_contour_points - 1 in bad_inds):
-        last_frontier = frontiers.pop()
-        frontiers[0] = np.concatenate((last_frontier, frontiers[0]))
-    return frontiers
+        last_frontier = filtered_frontiers.pop()
+        filtered_frontiers[0] = np.concatenate((last_frontier, filtered_frontiers[0]))
+    return filtered_frontiers
 
 
 def frontier_waypoints(
