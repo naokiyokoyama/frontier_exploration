@@ -41,9 +41,7 @@ def detect_frontiers(
         full_map, explored_mask, area_thresh
     )
     contours, _ = cv2.findContours(
-        filtered_explored_mask,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE,
+        filtered_explored_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
     unexplored_mask = np.where(filtered_explored_mask > 0, 0, full_map)
     unexplored_mask = cv2.blur(  # blurring for some leeway
