@@ -82,8 +82,8 @@ def contour_to_frontiers(contour, unexplored_mask):
     value of 0 in the unexplored mask. This function will split the contour into
     multiple arrays"""
     bad_inds = []
-    num_contours = len(contour)
-    for idx in range(num_contours):
+    num_contour_points = len(contour)
+    for idx in range(num_contour_points):
         point = contour[idx][0]
         x, y = point
         if unexplored_mask[y, x] == 0:
@@ -91,7 +91,7 @@ def contour_to_frontiers(contour, unexplored_mask):
     frontiers = np.split(contour, bad_inds)
     frontiers = [i for i in frontiers if len(i) > 1]
     # Combine the first and last frontier if adjacent (no bad points in between them)
-    if not (0 in bad_inds or num_contours - 1 in bad_inds):
+    if not (0 in bad_inds or num_contour_points - 1 in bad_inds):
         last_frontier = frontiers.pop()
         frontiers[0] = np.concatenate((last_frontier, frontiers[0]))
     return frontiers
@@ -187,7 +187,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "-n",
         "--num-iterations",
-        help="Number of iterations to run the algorithm for timing purposes. Set to"
+        help="Number of iterations to run the algorithm for timing purposes. Set to "
         "0 for no timing",
         type=int,
         default=500,
