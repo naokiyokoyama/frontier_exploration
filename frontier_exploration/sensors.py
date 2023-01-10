@@ -47,6 +47,7 @@ class FrontierWaypoint(Sensor):
 
         self._area_thresh_in_pixels = None
         self._visibility_dist_in_pixels = None
+        self._agent_position = None
 
     def _get_uuid(self, *args: Any, **kwargs: Any) -> str:
         return self.cls_uuid
@@ -61,6 +62,12 @@ class FrontierWaypoint(Sensor):
             shape=(1,),
             dtype=np.uint8,
         )
+
+    @property
+    def agent_position(self):
+        if self._agent_position is None:
+            self._agent_position = self._sim.get_agent_state().position
+        return self._agent_position
 
     def get_observation(
         self, task: EmbodiedTask, episode, *args: Any, **kwargs: Any
@@ -105,9 +112,8 @@ class FrontierWaypoint(Sensor):
         return closest_frontier_waypoint
 
     def _get_next_waypoint(self, frontier_waypoint: np.ndarray):
-        current_position = self._sim.get_agent_state().position
         shortest_path = habitat_sim.nav.ShortestPath()
-        shortest_path.requested_start = np.array(current_position, dtype=np.float32)
+        shortest_path.requested_start = self.agent_position
         shortest_path.requested_end = self._pixel_to_map_coors(frontier_waypoint)
         assert self._sim.pathfinder.find_path(shortest_path), "Could not find path!"
         next_waypoint = shortest_path.points[1]
@@ -123,8 +129,6 @@ class FrontierWaypoint(Sensor):
         euclidean_distances = np.linalg.norm(waypoints - [x0, y0], axis=1)
         sorted_waypoints = waypoints[np.argsort(euclidean_distances)]
         euclidean_distances.sort()
-
-        agent_position = self._sim.get_agent_state().position
         min_dist = np.inf
         closest_waypoint = None
         for waypoint, heuristic in zip(sorted_waypoints, euclidean_distances):
@@ -141,9 +145,9 @@ class FrontierWaypoint(Sensor):
         if next_waypoint is None:
             return np.array([STOP], dtype=np.int)
 
-        agent_position = self._sim.get_agent_state().position
         heading_to_waypoint = np.arctan2(
-            next_waypoint[2] - agent_position[2], next_waypoint[0] - agent_position[0]
+            next_waypoint[2] - self.agent_position[2],
+            next_waypoint[0] - self.agent_position[0],
         )
         agent_heading = -self._get_polar_angle() + np.pi / 2.0
         heading_error = wrap_heading(heading_to_waypoint - agent_heading)
@@ -156,10 +160,9 @@ class FrontierWaypoint(Sensor):
         return np.array([MOVE_FORWARD], dtype=np.int)
 
     def _get_agent_pixel_coords(self) -> np.ndarray:
-        agent_position = self._sim.get_agent_state().position
         a_x, a_y = maps.to_grid(
-            agent_position[2],
-            agent_position[0],
+            self.agent_position[2],
+            self.agent_position[0],
             (self.top_down_map.shape[0], self.top_down_map.shape[1]),
             sim=self._sim,
         )
@@ -175,6 +178,7 @@ class FrontierWaypoint(Sensor):
         )
 
     def _reset_maps(self):
+        self._agent_position = None
         self.top_down_map = maps.get_topdown_map_from_sim(
             self._sim,
             map_resolution=self._map_resolution,
@@ -196,7 +200,7 @@ class FrontierWaypoint(Sensor):
             self._sim,
         )
         return self._sim.pathfinder.snap_point(
-            [realworld_y, self._sim.get_agent_state().position[1], realworld_x]
+            [realworld_y, self.agent_position[1], realworld_x]
         )
 
 
