@@ -181,8 +181,8 @@ class FrontierWaypoint(Sensor):
             draw_border=False,
         )
         self.fog_of_war_mask = np.zeros_like(self.top_down_map)
-        self._area_thresh_in_pixels = (
-            self._convert_meters_to_pixel(self._area_thresh) ** 2
+        self._area_thresh_in_pixels = self._convert_meters_to_pixel(
+            self._area_thresh ** 2
         )
         self._visibility_dist_in_pixels = self._convert_meters_to_pixel(
             self._visibility_dist
