@@ -48,6 +48,7 @@ class FrontierWaypoint(Sensor):
         self._area_thresh_in_pixels = None
         self._visibility_dist_in_pixels = None
         self._agent_position = None
+        self._agent_heading = None
 
     def _get_uuid(self, *args: Any, **kwargs: Any) -> str:
         return self.cls_uuid
@@ -69,6 +70,12 @@ class FrontierWaypoint(Sensor):
             self._agent_position = self._sim.get_agent_state().position
         return self._agent_position
 
+    @property
+    def agent_heading(self):
+        if self._agent_heading is None:
+            self._agent_heading = TopDownMap.get_polar_angle(self)
+        return self._agent_heading
+
     def get_observation(
         self, task: EmbodiedTask, episode, *args: Any, **kwargs: Any
     ) -> np.ndarray:
@@ -89,7 +96,7 @@ class FrontierWaypoint(Sensor):
             self.top_down_map,
             self.fog_of_war_mask,
             self._get_agent_pixel_coords(),
-            self._get_polar_angle(),
+            self.agent_heading,
             fov=self._fov,
             max_line_len=self._visibility_dist_in_pixels,
         )
@@ -149,14 +156,12 @@ class FrontierWaypoint(Sensor):
             next_waypoint[2] - self.agent_position[2],
             next_waypoint[0] - self.agent_position[0],
         )
-        agent_heading = -self._get_polar_angle() + np.pi / 2.0
+        agent_heading = wrap_heading(np.pi / 2.0 - self.agent_heading)
         heading_error = wrap_heading(heading_to_waypoint - agent_heading)
-        if abs(heading_error) > self._turn_angle:
-            if heading_error > 0:
-                return np.array([TURN_RIGHT], dtype=np.int)
-            else:
-                return np.array([TURN_LEFT], dtype=np.int)
-
+        if heading_error > self._turn_angle:
+            return np.array([TURN_RIGHT], dtype=np.int)
+        elif heading_error < -self._turn_angle:
+            return np.array([TURN_LEFT], dtype=np.int)
         return np.array([MOVE_FORWARD], dtype=np.int)
 
     def _get_agent_pixel_coords(self) -> np.ndarray:
@@ -168,9 +173,6 @@ class FrontierWaypoint(Sensor):
         )
         return np.array([a_x, a_y])
 
-    def _get_polar_angle(self):
-        return TopDownMap.get_polar_angle(self)
-
     def _convert_meters_to_pixel(self, meters: float) -> int:
         return int(
             meters
@@ -179,6 +181,7 @@ class FrontierWaypoint(Sensor):
 
     def _reset_maps(self):
         self._agent_position = None
+        self._agent_heading = None
         self.top_down_map = maps.get_topdown_map_from_sim(
             self._sim,
             map_resolution=self._map_resolution,
