@@ -208,7 +208,7 @@ if __name__ == "__main__":
     if args.num_iterations > 0:
         # Skip first run as it's slower due to JIT compilation
         print(
-            f"Avg. time taken for algorithm over {args.num_iterarions} runs:",
+            f"Avg. time taken for algorithm over {args.num_iterations} runs:",
             np.mean(times[1:]),
         )
 
