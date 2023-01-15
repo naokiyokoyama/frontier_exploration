@@ -10,6 +10,7 @@ from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
 from habitat.tasks.nav.nav import TopDownMap
 from habitat.utils.visualizations import fog_of_war, maps
 from hydra.core.config_store import ConfigStore
+from numba import njit
 from omegaconf import DictConfig
 
 from frontier_exploration.explorer import detect_frontier_waypoints
@@ -31,9 +32,11 @@ class FrontierWaypoint(Sensor):
 
         # Extract information from config
         self._config = config
+        self._ang_vel = np.deg2rad(config.ang_vel)
         self._area_thresh = config.area_thresh
         self._forward_step_size = config.forward_step_size
         self._fov = config.fov
+        self._lin_vel = config.lin_vel
         self._map_resolution = config.map_resolution
         self._success_distance = config.success_distance
         self._turn_angle = np.deg2rad(config.turn_angle)
@@ -82,6 +85,7 @@ class FrontierWaypoint(Sensor):
         if not task.is_episode_active or self.top_down_map is None:
             self._reset_maps()  # New episode, reset maps
 
+        self._agent_position, self._agent_heading = None, None
         self._update_fog_of_war_mask()
         self.closest_frontier_waypoint = self._get_frontier_waypoint()
         # Decide an action to take
@@ -113,9 +117,7 @@ class FrontierWaypoint(Sensor):
             return None
         # frontiers are in (y, x) format, so we need to do some swapping
         self.frontier_waypoints = frontier_waypoints[:, ::-1]
-        closest_frontier_waypoint = self._get_closest_waypoint(
-            self.frontier_waypoints, self._get_agent_pixel_coords()
-        )
+        closest_frontier_waypoint = self._get_closest_waypoint(self.frontier_waypoints)
         return closest_frontier_waypoint
 
     def _get_next_waypoint(self, frontier_waypoint: np.ndarray):
@@ -128,24 +130,45 @@ class FrontierWaypoint(Sensor):
             return None
         return next_waypoint
 
-    def _get_closest_waypoint(
-        self, waypoints: np.ndarray, agent_position: np.ndarray
-    ) -> np.ndarray:
-        """A* search to find the closest (geodesic) waypoint to the agent."""
-        x0, y0 = agent_position
-        euclidean_distances = np.linalg.norm(waypoints - [x0, y0], axis=1)
-        sorted_waypoints = waypoints[np.argsort(euclidean_distances)]
-        euclidean_distances.sort()
-        min_dist = np.inf
+    def _get_closest_waypoint(self, waypoints: np.ndarray) -> np.ndarray:
+        """A* search to find the waypoint that is fastest to reach."""
+        sim_waypoints = self._pixel_to_map_coors(waypoints)
+        euclidean_dists = np.linalg.norm(sim_waypoints - self.agent_position, axis=1)
+        heading_to_waypoints = np.arctan2(
+            sim_waypoints[:, 2] - self.agent_position[2],
+            sim_waypoints[:, 0] - self.agent_position[0],
+        )
+        agent_heading = wrap_heading(np.pi / 2.0 - self.agent_heading)
+        heading_errors = np.abs(wrap_heading(heading_to_waypoints - agent_heading))
+        # Amount of time it would take to reach each waypoint from the current position
+        # and heading, ignoring the existence of any obstacles, with point-turn dynamics
+        euclidean_completion_times = (
+            heading_errors / self._ang_vel + euclidean_dists / self._lin_vel
+        )
+
+        sorted_inds = np.argsort(euclidean_completion_times)
+        sorted_times = euclidean_completion_times[sorted_inds]
+        sorted_waypoints = sim_waypoints[sorted_inds]
+
+        min_cost = np.inf
         closest_waypoint = None
-        for waypoint, heuristic in zip(sorted_waypoints, euclidean_distances):
-            if heuristic > min_dist:
+        for idx, sim_waypoint, heuristic, yaw_diff in zip(
+            sorted_inds, sorted_waypoints, sorted_times, heading_errors
+        ):
+            if heuristic > min_cost:
                 break
-            sim_waypoint = self._pixel_to_map_coors(waypoint)
-            dist = self._sim.geodesic_distance(agent_position, sim_waypoint)
-            if dist < min_dist:
-                min_dist = dist
-                closest_waypoint = waypoint
+            shortest_path = habitat_sim.nav.ShortestPath()
+            shortest_path.requested_start = self.agent_position
+            shortest_path.requested_end = sim_waypoint
+            if not self._sim.pathfinder.find_path(shortest_path):
+                continue
+            path = np.array(shortest_path.points)
+            cost = shortest_path_completion_time(
+                path, self._lin_vel, self._ang_vel, yaw_diff
+            )
+            if min_cost > cost:
+                min_cost = cost
+                closest_waypoint = waypoints[idx]
         return closest_waypoint
 
     def _decide_action(self, next_waypoint: np.ndarray) -> np.ndarray:
@@ -180,8 +203,6 @@ class FrontierWaypoint(Sensor):
         )
 
     def _reset_maps(self):
-        self._agent_position = None
-        self._agent_heading = None
         self.top_down_map = maps.get_topdown_map_from_sim(
             self._sim,
             map_resolution=self._map_resolution,
@@ -196,20 +217,53 @@ class FrontierWaypoint(Sensor):
         )
 
     def _pixel_to_map_coors(self, pixel: np.ndarray) -> np.ndarray:
+        if pixel.ndim == 1:
+            x, y = pixel
+        else:
+            x, y = pixel[:, 0], pixel[:, 1]
         realworld_x, realworld_y = maps.from_grid(
-            pixel[0],
-            pixel[1],
-            (self.top_down_map.shape[0], self.top_down_map.shape[1]),
-            self._sim,
+            x, y, (self.top_down_map.shape[0], self.top_down_map.shape[1]), self._sim
         )
-        return self._sim.pathfinder.snap_point(
-            [realworld_y, self.agent_position[1], realworld_x]
-        )
+        if pixel.ndim == 1:
+            return self._sim.pathfinder.snap_point(
+                [realworld_y, self.agent_position[1], realworld_x]
+            )
+        snapped = [
+            self._sim.pathfinder.snap_point([y, self.agent_position[1], x])
+            for y, x in zip(realworld_y, realworld_x)  # noqa
+        ]
+        return np.array(snapped)
 
 
+@njit
 def wrap_heading(heading):
     """Ensures input heading is between -180 an 180; can be float or np.ndarray"""
     return (heading + np.pi) % (2 * np.pi) - np.pi
+
+
+@njit
+def shortest_path_completion_time(path, max_lin_vel, max_ang_vel, yaw_diff):
+    time = 0
+    cur_pos = path[0]
+    cur_yaw = None
+    for i in range(1, path.shape[0]):
+        target_pos = path[i]
+        target_yaw = np.arctan2(target_pos[1] - cur_pos[1], target_pos[0] - cur_pos[0])
+
+        distance = np.sqrt(
+            (target_pos[0] - cur_pos[0]) ** 2 + (target_pos[1] - cur_pos[1]) ** 2
+        )
+        if cur_yaw is not None:
+            yaw_diff = np.abs(wrap_heading(target_yaw - cur_yaw))
+
+        lin_time = distance / max_lin_vel
+        ang_time = yaw_diff / max_ang_vel
+        time += lin_time + ang_time
+
+        cur_pos = target_pos
+        cur_yaw = target_yaw
+
+    return time
 
 
 @dataclass
@@ -217,9 +271,11 @@ class FrontierWaypointSensorConfig(LabSensorConfig):
     type: str = FrontierWaypoint.__name__
     # minimum unexplored area (in meters) needed adjacent to a frontier for that
     # frontier to be valid
+    ang_vel: float = 10.0  # degrees per second
     area_thresh: float = 3.0  # square meters
     forward_step_size: float = 0.25  # meters
     fov: int = 90
+    lin_vel: float = 0.25  # meters per second
     map_resolution: int = 1024
     success_distance: float = 0.1  # meters
     turn_angle: float = 10.0  # degrees
