@@ -52,6 +52,7 @@ class FrontierWaypoint(Sensor):
         self._visibility_dist_in_pixels = None
         self._agent_position = None
         self._agent_heading = None
+        self._curr_ep_id = None
 
     def _get_uuid(self, *args: Any, **kwargs: Any) -> str:
         return self.cls_uuid
@@ -82,7 +83,8 @@ class FrontierWaypoint(Sensor):
     def get_observation(
         self, task: EmbodiedTask, episode, *args: Any, **kwargs: Any
     ) -> np.ndarray:
-        if not task.is_episode_active or self.top_down_map is None:
+        if self._curr_ep_id != episode.episode_id:
+            self._curr_ep_id = episode.episode_id
             self._reset_maps()  # New episode, reset maps
 
         self._agent_position, self._agent_heading = None, None
