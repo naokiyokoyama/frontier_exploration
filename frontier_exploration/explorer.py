@@ -7,6 +7,9 @@ from numba import njit
 from frontier_exploration.utils import closest_line_segment
 
 
+VISUALIZE = False
+
+
 def detect_frontier_waypoints(
     full_map: np.ndarray,
     explored_mask: np.ndarray,
@@ -14,14 +17,24 @@ def detect_frontier_waypoints(
     xy: Optional[np.ndarray] = None,
 ):
     frontiers = detect_frontiers(full_map, explored_mask, area_thresh)
+    if VISUALIZE:
+        img = cv2.cvtColor(full_map * 255, cv2.COLOR_GRAY2BGR)
+        img[explored_mask > 0] = (127, 127, 127)
+        cv2.drawContours(img, frontiers, -1, (0, 255, 0), 3)
+        # Draw a dot at each point on each frontier
+        for frontier in [frontiers[1]]:
+            for point in frontier:
+                cv2.circle(img, point[0], 2, (0, 0, 255), -1)
+        cv2.imshow("frontiers", img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
     waypoints = frontier_waypoints(frontiers, xy)
     return waypoints
 
 
 def detect_frontiers(
-    full_map: np.ndarray,
-    explored_mask: np.ndarray,
-    area_thresh: Optional[int] = -1,
+    full_map: np.ndarray, explored_mask: np.ndarray, area_thresh: Optional[int] = -1
 ) -> List[np.ndarray]:
     """Detects frontiers in a map.
 
@@ -97,7 +110,7 @@ def contour_to_frontiers(contour, unexplored_mask):
         if len(f) > 1:
             if idx == 0:
                 filtered_frontiers.append(f)
-            else:
+            elif len(f) > 2:  # a frontier must have at least 2 points (3 with bad ind)
                 filtered_frontiers.append(f[1:])
     # Combine the first and last frontier if adjacent (no bad points in between them)
     if not (0 in bad_inds or num_contour_points - 1 in bad_inds):
