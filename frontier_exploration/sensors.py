@@ -164,15 +164,14 @@ class FrontierWaypoint(Sensor):
         else:
             heuristics = euclidean_heuristic(sim_waypoints, self.agent_position)
         sorted_inds = np.argsort(heuristics)
-        sorted_waypoints = sim_waypoints[sorted_inds]
         min_cost = np.inf
         closest_waypoint = None
-        for idx, sim_waypoint, h in zip(sorted_inds, sorted_waypoints, heuristics):
-            if h > min_cost:
+        for idx in sorted_inds:
+            if heuristics[idx] > min_cost:
                 break
             shortest_path = habitat_sim.nav.ShortestPath()
             shortest_path.requested_start = self.agent_position
-            shortest_path.requested_end = sim_waypoint
+            shortest_path.requested_end = sim_waypoints[idx]
             if not self._sim.pathfinder.find_path(shortest_path):
                 continue
             path = np.array(shortest_path.points)
