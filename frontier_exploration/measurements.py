@@ -46,6 +46,9 @@ class FrontierExplorationMap(TopDownMap):
             else:
                 color, size = (0, 255, 255), 20
             cv2.circle(new_map, waypoint[::-1].astype(np.int), size, color, -1)
+        next_waypoint = self._frontier_exploration_sensor.next_waypoint_pixels
+        if next_waypoint is not None:
+            cv2.circle(new_map, next_waypoint[::-1].astype(np.int), 20, (255, 0, 0), 3)
         self._metric["map"] = new_map
 
 

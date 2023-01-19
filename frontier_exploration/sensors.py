@@ -83,24 +83,27 @@ class FrontierWaypoint(Sensor):
             self._agent_heading = TopDownMap.get_polar_angle(self)
         return self._agent_heading
 
+    @property
+    def next_waypoint_pixels(self):
+        if self._next_waypoint is None:
+            return None
+        return self._map_coors_to_pixel(self._next_waypoint)
+
     def get_observation(
         self, task: EmbodiedTask, episode, *args: Any, **kwargs: Any
     ) -> np.ndarray:
+        self._agent_position, self._agent_heading = None, None
         if self._curr_ep_id != episode.episode_id:
             self._curr_ep_id = episode.episode_id
             self._reset_maps()  # New episode, reset maps
 
-        self._agent_position, self._agent_heading = None, None
         updated = self._update_fog_of_war_mask()
-        if updated:
+        if updated:  # look for new frontiers if the fog of war mask has changed
             self.closest_frontier_waypoint = self._get_frontier_waypoint()
-            # Decide an action to take
-            if self.closest_frontier_waypoint is None:
-                return np.array([STOP], dtype=np.int)
-            else:
-                self._next_waypoint = self._get_next_waypoint(
-                    self.closest_frontier_waypoint
-                )
+        if self.closest_frontier_waypoint is None:  # no navigable frontiers detected
+            return np.array([STOP], dtype=np.int)
+
+        self._next_waypoint = self._get_next_waypoint(self.closest_frontier_waypoint)
         return self._decide_action(self._next_waypoint)
 
     def _update_fog_of_war_mask(self):
@@ -201,13 +204,7 @@ class FrontierWaypoint(Sensor):
         return np.array([MOVE_FORWARD], dtype=np.int)
 
     def _get_agent_pixel_coords(self) -> np.ndarray:
-        a_x, a_y = maps.to_grid(
-            self.agent_position[2],
-            self.agent_position[0],
-            (self.top_down_map.shape[0], self.top_down_map.shape[1]),
-            sim=self._sim,
-        )
-        return np.array([a_x, a_y])
+        return self._map_coors_to_pixel(self.agent_position)
 
     def _convert_meters_to_pixel(self, meters: float) -> int:
         return int(
@@ -229,6 +226,7 @@ class FrontierWaypoint(Sensor):
             self._visibility_dist
         )
         self._default_dir = bool(random.getrandbits(1))
+        self._next_waypoint = None
 
     def _pixel_to_map_coors(self, pixel: np.ndarray) -> np.ndarray:
         if pixel.ndim == 1:
@@ -247,6 +245,15 @@ class FrontierWaypoint(Sensor):
             for y, x in zip(realworld_y, realworld_x)  # noqa
         ]
         return np.array(snapped)
+
+    def _map_coors_to_pixel(self, position) -> np.ndarray:
+        a_x, a_y = maps.to_grid(
+            position[2],
+            position[0],
+            (self.top_down_map.shape[0], self.top_down_map.shape[1]),
+            sim=self._sim,
+        )
+        return np.array([a_x, a_y])
 
 
 @njit
