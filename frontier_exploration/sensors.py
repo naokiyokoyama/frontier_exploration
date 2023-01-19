@@ -145,42 +145,28 @@ class FrontierWaypoint(Sensor):
         return next_waypoint
 
     def _get_closest_waypoint(self, waypoints: np.ndarray) -> np.ndarray:
-        """A* search to find the waypoint that is fastest to reach."""
-        sim_waypoints = self._pixel_to_map_coors(waypoints)
-        euclidean_dists = np.linalg.norm(sim_waypoints - self.agent_position, axis=1)
-        heading_to_waypoints = np.arctan2(
-            sim_waypoints[:, 2] - self.agent_position[2],
-            sim_waypoints[:, 0] - self.agent_position[0],
-        )
-        agent_heading = wrap_heading(np.pi / 2.0 - self.agent_heading)
-        heading_errors = np.abs(wrap_heading(heading_to_waypoints - agent_heading))
-        # Amount of time it would take to reach each waypoint from the current position
-        # and heading, ignoring the existence of any obstacles, with point-turn dynamics
-        euclidean_completion_times = (
-            heading_errors / self._ang_vel + euclidean_dists / self._lin_vel
-        )
-
-        sorted_inds = np.argsort(euclidean_completion_times)
-        sorted_times = euclidean_completion_times[sorted_inds]
-        sorted_waypoints = sim_waypoints[sorted_inds]
-
         min_cost = np.inf
         closest_waypoint = None
-        for idx, sim_waypoint, heuristic, yaw_diff in zip(
-            sorted_inds, sorted_waypoints, sorted_times, heading_errors
-        ):
-            if heuristic > min_cost:
-                break
+        sim_waypoints = self._pixel_to_map_coors(waypoints)
+        for idx, sim_waypoint in enumerate(sim_waypoints):
             shortest_path = habitat_sim.nav.ShortestPath()
             shortest_path.requested_start = self.agent_position
             shortest_path.requested_end = sim_waypoint
             if not self._sim.pathfinder.find_path(shortest_path):
                 continue
             path = np.array(shortest_path.points)
-            cost = shortest_path_completion_time(
-                path, self._lin_vel, self._ang_vel, yaw_diff
+            next_waypoint = path[1]
+            heading_to_waypoint = np.arctan2(
+                next_waypoint[2] - self.agent_position[2],
+                next_waypoint[0] - self.agent_position[0],
             )
-            if min_cost > cost:
+            agent_heading = wrap_heading(np.pi / 2.0 - self.agent_heading)
+            heading_error = wrap_heading(heading_to_waypoint - agent_heading)
+
+            cost = shortest_path_completion_time(
+                path, self._lin_vel, self._ang_vel, np.abs(heading_error)
+            )
+            if cost < min_cost:
                 min_cost = cost
                 closest_waypoint = waypoints[idx]
         return closest_waypoint
@@ -269,10 +255,10 @@ def shortest_path_completion_time(path, max_lin_vel, max_ang_vel, yaw_diff):
     cur_yaw = None
     for i in range(1, path.shape[0]):
         target_pos = path[i]
-        target_yaw = np.arctan2(target_pos[1] - cur_pos[1], target_pos[0] - cur_pos[0])
+        target_yaw = np.arctan2(target_pos[2] - cur_pos[2], target_pos[0] - cur_pos[0])
 
         distance = np.sqrt(
-            (target_pos[0] - cur_pos[0]) ** 2 + (target_pos[1] - cur_pos[1]) ** 2
+            (target_pos[2] - cur_pos[2]) ** 2 + (target_pos[0] - cur_pos[0]) ** 2
         )
         if cur_yaw is not None:
             yaw_diff = np.abs(wrap_heading(target_yaw - cur_yaw))
