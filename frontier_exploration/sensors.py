@@ -1,3 +1,4 @@
+import random
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,6 +54,8 @@ class FrontierWaypoint(Sensor):
         self._agent_position = None
         self._agent_heading = None
         self._curr_ep_id = None
+        self._default_dir = False
+        self._next_waypoint = None
 
     def _get_uuid(self, *args: Any, **kwargs: Any) -> str:
         return self.cls_uuid
@@ -88,16 +91,20 @@ class FrontierWaypoint(Sensor):
             self._reset_maps()  # New episode, reset maps
 
         self._agent_position, self._agent_heading = None, None
-        self._update_fog_of_war_mask()
-        self.closest_frontier_waypoint = self._get_frontier_waypoint()
-        # Decide an action to take
-        if self.closest_frontier_waypoint is None:
-            next_waypoint = None
-        else:
-            next_waypoint = self._get_next_waypoint(self.closest_frontier_waypoint)
-        return self._decide_action(next_waypoint)
+        updated = self._update_fog_of_war_mask()
+        if updated:
+            self.closest_frontier_waypoint = self._get_frontier_waypoint()
+            # Decide an action to take
+            if self.closest_frontier_waypoint is None:
+                return np.array([STOP], dtype=np.int)
+            else:
+                self._next_waypoint = self._get_next_waypoint(
+                    self.closest_frontier_waypoint
+                )
+        return self._decide_action(self._next_waypoint)
 
     def _update_fog_of_war_mask(self):
+        orig = self.fog_of_war_mask.copy()
         self.fog_of_war_mask = fog_of_war.reveal_fog_of_war(
             self.top_down_map,
             self.fog_of_war_mask,
@@ -106,6 +113,8 @@ class FrontierWaypoint(Sensor):
             fov=self._fov,
             max_line_len=self._visibility_dist_in_pixels,
         )
+        updated = not np.array_equal(orig, self.fog_of_war_mask)
+        return updated
 
     def _get_frontier_waypoint(self):
         # Get waypoint to closest frontier
@@ -175,7 +184,9 @@ class FrontierWaypoint(Sensor):
 
     def _decide_action(self, next_waypoint: np.ndarray) -> np.ndarray:
         if next_waypoint is None:
-            return np.array([STOP], dtype=np.int)
+            return np.array(
+                [TURN_LEFT if self._default_dir else TURN_RIGHT], dtype=np.int
+            )
 
         heading_to_waypoint = np.arctan2(
             next_waypoint[2] - self.agent_position[2],
@@ -217,6 +228,7 @@ class FrontierWaypoint(Sensor):
         self._visibility_dist_in_pixels = self._convert_meters_to_pixel(
             self._visibility_dist
         )
+        self._default_dir = bool(random.getrandbits(1))
 
     def _pixel_to_map_coors(self, pixel: np.ndarray) -> np.ndarray:
         if pixel.ndim == 1:
