@@ -11,10 +11,15 @@ from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
 from habitat.tasks.nav.nav import TopDownMap
 from habitat.utils.visualizations import fog_of_war, maps
 from hydra.core.config_store import ConfigStore
-from numba import njit
 from omegaconf import DictConfig
 
 from frontier_exploration.explorer import detect_frontier_waypoints
+from frontier_exploration.utils.general_utils import wrap_heading
+from frontier_exploration.utils.path_utils import (
+    completion_time_heuristic,
+    euclidean_heuristic,
+    shortest_path_completion_time,
+)
 
 STOP, MOVE_FORWARD, TURN_LEFT, TURN_RIGHT = 0, 1, 2, 3
 
@@ -39,6 +44,7 @@ class FrontierWaypoint(Sensor):
         self._fov = config.fov
         self._lin_vel = config.lin_vel
         self._map_resolution = config.map_resolution
+        self._minimize_time = config.minimize_time
         self._success_distance = config.success_distance
         self._turn_angle = np.deg2rad(config.turn_angle)
         self._visibility_dist = config.visibility_dist
@@ -85,6 +91,7 @@ class FrontierWaypoint(Sensor):
 
     @property
     def next_waypoint_pixels(self):
+        # This property is used by the FrontierExplorationMap measurement
         if self._next_waypoint is None:
             return None
         return self._map_coors_to_pixel(self._next_waypoint)
@@ -145,27 +152,37 @@ class FrontierWaypoint(Sensor):
         return next_waypoint
 
     def _get_closest_waypoint(self, waypoints: np.ndarray) -> np.ndarray:
+        sim_waypoints = self._pixel_to_map_coors(waypoints)
+        if self._minimize_time:
+            heuristics = completion_time_heuristic(
+                sim_waypoints,
+                self.agent_position,
+                self.agent_heading,
+                self._lin_vel,
+                self._ang_vel,
+            )
+        else:
+            heuristics = euclidean_heuristic(sim_waypoints, self.agent_position)
+        sorted_inds = np.argsort(heuristics)
+        sorted_waypoints = sim_waypoints[sorted_inds]
         min_cost = np.inf
         closest_waypoint = None
-        sim_waypoints = self._pixel_to_map_coors(waypoints)
-        for idx, sim_waypoint in enumerate(sim_waypoints):
+        for idx, sim_waypoint, h in zip(sorted_inds, sorted_waypoints, heuristics):
+            if h > min_cost:
+                break
             shortest_path = habitat_sim.nav.ShortestPath()
             shortest_path.requested_start = self.agent_position
             shortest_path.requested_end = sim_waypoint
             if not self._sim.pathfinder.find_path(shortest_path):
                 continue
             path = np.array(shortest_path.points)
-            next_waypoint = path[1]
-            heading_to_waypoint = np.arctan2(
-                next_waypoint[2] - self.agent_position[2],
-                next_waypoint[0] - self.agent_position[0],
-            )
-            agent_heading = wrap_heading(np.pi / 2.0 - self.agent_heading)
-            heading_error = wrap_heading(heading_to_waypoint - agent_heading)
-
-            cost = shortest_path_completion_time(
-                path, self._lin_vel, self._ang_vel, np.abs(heading_error)
-            )
+            if self._minimize_time:
+                heading_error = self._heading_error(path[1])
+                cost = shortest_path_completion_time(
+                    path, self._lin_vel, self._ang_vel, np.abs(heading_error)
+                )
+            else:
+                cost = shortest_path.geodesic_distance
             if cost < min_cost:
                 min_cost = cost
                 closest_waypoint = waypoints[idx]
@@ -176,18 +193,20 @@ class FrontierWaypoint(Sensor):
             return np.array(
                 [TURN_LEFT if self._default_dir else TURN_RIGHT], dtype=np.int
             )
-
-        heading_to_waypoint = np.arctan2(
-            next_waypoint[2] - self.agent_position[2],
-            next_waypoint[0] - self.agent_position[0],
-        )
-        agent_heading = wrap_heading(np.pi / 2.0 - self.agent_heading)
-        heading_error = wrap_heading(heading_to_waypoint - agent_heading)
+        heading_error = self._heading_error(next_waypoint)
         if heading_error > self._turn_angle:
             return np.array([TURN_RIGHT], dtype=np.int)
         elif heading_error < -self._turn_angle:
             return np.array([TURN_LEFT], dtype=np.int)
         return np.array([MOVE_FORWARD], dtype=np.int)
+
+    def _heading_error(self, position: np.ndarray) -> float:
+        heading_to_waypoint = np.arctan2(
+            position[2] - self.agent_position[2], position[0] - self.agent_position[0]
+        )
+        agent_heading = wrap_heading(np.pi / 2.0 - self.agent_heading)
+        heading_error = wrap_heading(heading_to_waypoint - agent_heading)
+        return heading_error
 
     def _get_agent_pixel_coords(self) -> np.ndarray:
         return self._map_coors_to_pixel(self.agent_position)
@@ -242,37 +261,6 @@ class FrontierWaypoint(Sensor):
         return np.array([a_x, a_y])
 
 
-@njit
-def wrap_heading(heading):
-    """Ensures input heading is between -180 an 180; can be float or np.ndarray"""
-    return (heading + np.pi) % (2 * np.pi) - np.pi
-
-
-@njit
-def shortest_path_completion_time(path, max_lin_vel, max_ang_vel, yaw_diff):
-    time = 0
-    cur_pos = path[0]
-    cur_yaw = None
-    for i in range(1, path.shape[0]):
-        target_pos = path[i]
-        target_yaw = np.arctan2(target_pos[2] - cur_pos[2], target_pos[0] - cur_pos[0])
-
-        distance = np.sqrt(
-            (target_pos[2] - cur_pos[2]) ** 2 + (target_pos[0] - cur_pos[0]) ** 2
-        )
-        if cur_yaw is not None:
-            yaw_diff = np.abs(wrap_heading(target_yaw - cur_yaw))
-
-        lin_time = distance / max_lin_vel
-        ang_time = yaw_diff / max_ang_vel
-        time += lin_time + ang_time
-
-        cur_pos = target_pos
-        cur_yaw = target_yaw
-
-    return time
-
-
 @dataclass
 class FrontierWaypointSensorConfig(LabSensorConfig):
     type: str = FrontierWaypoint.__name__
@@ -284,6 +272,7 @@ class FrontierWaypointSensorConfig(LabSensorConfig):
     fov: int = 90
     lin_vel: float = 0.25  # meters per second
     map_resolution: int = 1024
+    minimize_time: bool = True
     success_distance: float = 0.1  # meters
     turn_angle: float = 10.0  # degrees
     visibility_dist: float = 5.0  # in meters

@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 from numba import njit
 
-from frontier_exploration.utils import closest_line_segment
+from frontier_exploration.utils.frontier_utils import closest_line_segment
 
 
 VISUALIZE = False
