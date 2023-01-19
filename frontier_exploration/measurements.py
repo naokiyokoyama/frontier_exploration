@@ -39,7 +39,7 @@ class FrontierExplorationMap(TopDownMap):
         # Update the map with visualizations of the frontier waypoints
         new_map = self._metric["map"].copy()
         for waypoint in self._frontier_exploration_sensor.frontier_waypoints:
-            if np.allclose(
+            if np.array_equal(
                 waypoint, self._frontier_exploration_sensor.closest_frontier_waypoint
             ):
                 color, size = (255, 0, 0), 30
