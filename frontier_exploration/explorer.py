@@ -113,7 +113,10 @@ def contour_to_frontiers(contour, unexplored_mask):
             elif len(f) > 2:  # a frontier must have at least 2 points (3 with bad ind)
                 filtered_frontiers.append(f[1:])
     # Combine the first and last frontier if adjacent (no bad points in between them)
-    if not (0 in bad_inds or num_contour_points - 1 in bad_inds) and filtered_frontiers:
+    if (
+        not (0 in bad_inds or num_contour_points - 1 in bad_inds)
+        and len(filtered_frontiers) > 1
+    ):
         last_frontier = filtered_frontiers.pop()
         filtered_frontiers[0] = np.concatenate((last_frontier, filtered_frontiers[0]))
     return filtered_frontiers
