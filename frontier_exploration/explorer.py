@@ -171,15 +171,16 @@ def get_frontier_midpoint(frontier) -> np.ndarray:
     cum_sum = np.cumsum(line_lengths)
     total_length = cum_sum[-1]
     # Find the midpoint of the frontier
-    midpoint = total_length / 2
+    half_length = total_length / 2
     # Find the line segment that contains the midpoint
-    line_segment_idx = np.argmax(cum_sum > midpoint)
+    line_segment_idx = np.argmax(cum_sum > half_length)
     # Calculate the coordinates of the midpoint
     line_segment = line_segments[line_segment_idx]
     line_length = line_lengths[line_segment_idx]
     # Use the difference between the midpoint length and cumsum
     # to find the proportion of the line segment that the midpoint is at
-    proportion = (midpoint - cum_sum[line_segment_idx - 1]) / line_length
+    length_up_to = cum_sum[line_segment_idx - 1] if line_segment_idx > 0 else 0
+    proportion = (half_length - length_up_to) / line_length
     # Calculate the midpoint coordinates
     midpoint = line_segment[0] + proportion * (line_segment[1] - line_segment[0])
     return midpoint
@@ -229,6 +230,9 @@ if __name__ == "__main__":
         default=500,
     )
     args = parser.parse_args()
+
+    if VISUALIZE:
+        args.num_iterations = 0
 
     # Read in the map
     full_map = cv2.imread(args.full_map, 0)
