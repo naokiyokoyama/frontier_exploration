@@ -56,6 +56,13 @@ def detect_frontiers(
     contours, _ = cv2.findContours(
         filtered_explored_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
+    if VISUALIZE:
+        img = cv2.cvtColor(full_map * 255, cv2.COLOR_GRAY2BGR)
+        img[explored_mask > 0] = (127, 127, 127)
+        cv2.drawContours(img, contours, -1, (0, 255, 0), 3)
+        cv2.imshow("contours", img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
     unexplored_mask = np.where(filtered_explored_mask > 0, 0, full_map)
     unexplored_mask = cv2.blur(  # blurring for some leeway
         np.where(unexplored_mask > 0, 255, unexplored_mask), (3, 3)
@@ -91,14 +98,13 @@ def filter_out_small_unexplored(
 def contour_to_frontiers(contour, unexplored_mask):
     """Given a contour from OpenCV, return a list of numpy arrays. Each array contains
     contiguous points forming a single frontier. The contour is assumed to be a set of
-    contiguous points, but some of these points are not on any frontier, indicated by a
-    value of 0 in the unexplored mask. This function will split the contour into
-    multiple arrays"""
+    contiguous points, but some of these points are not on any frontier, indicated by
+    having a value of 0 in the unexplored mask. This function will split the contour
+    into multiple arrays that exclude such points."""
     bad_inds = []
     num_contour_points = len(contour)
     for idx in range(num_contour_points):
-        point = contour[idx][0]
-        x, y = point
+        x, y = contour[idx][0]
         if unexplored_mask[y, x] == 0:
             bad_inds.append(idx)
     frontiers = np.split(contour, bad_inds)
