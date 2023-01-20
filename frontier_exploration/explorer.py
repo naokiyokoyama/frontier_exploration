@@ -20,11 +20,16 @@ def detect_frontier_waypoints(
     if VISUALIZE:
         img = cv2.cvtColor(full_map * 255, cv2.COLOR_GRAY2BGR)
         img[explored_mask > 0] = (127, 127, 127)
-        cv2.drawContours(img, frontiers, -1, (0, 255, 0), 3)
         # Draw a dot at each point on each frontier
-        for frontier in [frontiers[1]]:
-            for point in frontier:
-                cv2.circle(img, point[0], 2, (0, 0, 255), -1)
+        for idx, frontier in enumerate(frontiers):
+            # Uniformly sample colors from the COLORMAP_RAINBOW
+            color = cv2.applyColorMap(
+                np.uint8([255 * (idx + 1) / len(frontiers)]), cv2.COLORMAP_RAINBOW
+            )[0][0]
+            color = tuple(int(i) for i in color)
+            for idx2, p in enumerate(frontier):
+                if idx2 < len(frontier) - 1:
+                    cv2.line(img, p[0], frontier[idx2 + 1][0], color, 3)
         cv2.imshow("frontiers", img)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
