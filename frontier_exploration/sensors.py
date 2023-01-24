@@ -60,7 +60,6 @@ class FrontierWaypoint(Sensor):
         self._agent_position = None
         self._agent_heading = None
         self._curr_ep_id = None
-        self._default_dir = False
         self._next_waypoint = None
 
     def _get_uuid(self, *args: Any, **kwargs: Any) -> str:
@@ -147,8 +146,6 @@ class FrontierWaypoint(Sensor):
         shortest_path.requested_end = self._pixel_to_map_coors(frontier_waypoint)
         assert self._sim.pathfinder.find_path(shortest_path), "Could not find path!"
         next_waypoint = shortest_path.points[1]
-        if shortest_path.geodesic_distance < self._success_distance:
-            return None
         return next_waypoint
 
     def _get_closest_waypoint(self, waypoints: np.ndarray) -> np.ndarray:
@@ -188,10 +185,6 @@ class FrontierWaypoint(Sensor):
         return closest_waypoint
 
     def _decide_action(self, next_waypoint: np.ndarray) -> np.ndarray:
-        if next_waypoint is None:
-            return np.array(
-                [TURN_LEFT if self._default_dir else TURN_RIGHT], dtype=np.int
-            )
         heading_error = self._heading_error(next_waypoint)
         if heading_error > self._turn_angle:
             return np.array([TURN_RIGHT], dtype=np.int)
@@ -229,7 +222,6 @@ class FrontierWaypoint(Sensor):
         self._visibility_dist_in_pixels = self._convert_meters_to_pixel(
             self._visibility_dist
         )
-        self._default_dir = bool(random.getrandbits(1))
         self._next_waypoint = None
 
     def _pixel_to_map_coors(self, pixel: np.ndarray) -> np.ndarray:
