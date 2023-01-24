@@ -1,3 +1,4 @@
+import os
 from typing import List, Optional
 
 import cv2
@@ -6,8 +7,8 @@ from numba import njit
 
 from frontier_exploration.utils.frontier_utils import closest_line_segment
 
-
-VISUALIZE = False
+VISUALIZE = os.environ.get("MAP_VISUALIZE", "False").lower() == "true"
+DEBUG = os.environ.get("MAP_DEBUG", "False").lower() == "true"
 
 
 def detect_frontier_waypoints(
@@ -16,6 +17,17 @@ def detect_frontier_waypoints(
     area_thresh: Optional[int] = -1,
     xy: Optional[np.ndarray] = None,
 ):
+    if DEBUG:
+        import time
+
+        os.makedirs("map_debug", exist_ok=True)
+        cv2.imwrite(
+            f"map_debug/{int(time.time())}_debug_full_map_{area_thresh}.png", full_map
+        )
+        cv2.imwrite(
+            f"map_debug/{int(time.time())}_debug_explored_mask_{area_thresh}.png",
+            explored_mask,
+        )
     frontiers = detect_frontiers(full_map, explored_mask, area_thresh)
     if VISUALIZE:
         img = cv2.cvtColor(full_map * 255, cv2.COLOR_GRAY2BGR)
@@ -123,13 +135,15 @@ def contour_to_frontiers(contour, unexplored_mask):
                 filtered_frontiers.append(f)
             elif len(f) > 2:  # a frontier must have at least 2 points (3 with bad ind)
                 filtered_frontiers.append(f[1:])
-    # Combine the first and last frontier if adjacent (no bad points in between them)
-    if (
-        not (0 in bad_inds or num_contour_points - 1 in bad_inds)
-        and len(filtered_frontiers) > 1
-    ):
-        last_frontier = filtered_frontiers.pop()
-        filtered_frontiers[0] = np.concatenate((last_frontier, filtered_frontiers[0]))
+    # Combine the first and last frontier if the first point of the first frontier and
+    # the last point of the last frontier are the first and last points of the original
+    # contour. Only check if there are at least 2 frontiers.
+    if len(filtered_frontiers) > 1:
+        first = filtered_frontiers[0][0]
+        last = filtered_frontiers[-1][-1]
+        if np.array_equal(first, contour[0]) and np.array_equal(last, contour[-1]):
+            last_frontier = filtered_frontiers.pop()
+            filtered_frontiers[0] = np.concatenate((last_frontier, filtered_frontiers[0]))
     return filtered_frontiers
 
 
