@@ -7,7 +7,7 @@ defaults:
     - frontier_exploration_map
   - override /habitat/task/lab_sensors:
       - pointgoal_with_gps_compass_sensor
-      - frontier_waypoint
+      - base_explorer
   - _self_
 
 habitat_baselines:

@@ -8,7 +8,7 @@ from habitat.config.default_structured_configs import TopDownMapMeasurementConfi
 from habitat.tasks.nav.nav import TopDownMap, NavigationEpisode
 from hydra.core.config_store import ConfigStore
 
-from frontier_exploration.sensors import FrontierWaypoint
+from frontier_exploration.base_expert import BaseExplorer
 
 
 @registry.register_measure
@@ -24,7 +24,7 @@ class FrontierExplorationMap(TopDownMap):
     ) -> None:
         assert "task" in kwargs, "task must be passed to reset_metric!"
         self._frontier_exploration_sensor = kwargs["task"].sensor_suite.sensors[
-            FrontierWaypoint.cls_uuid
+            BaseExplorer.cls_uuid
         ]
         super().reset_metric(episode, *args, **kwargs)
 

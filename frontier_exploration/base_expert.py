@@ -1,4 +1,3 @@
-import random
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,10 +24,10 @@ STOP, MOVE_FORWARD, TURN_LEFT, TURN_RIGHT = 0, 1, 2, 3
 
 
 @registry.register_sensor
-class FrontierWaypoint(Sensor):
-    """Returns a waypoint towards the closest frontier"""
+class BaseExplorer(Sensor):
+    """Returns the action that moves the robot towards the closest frontier"""
 
-    cls_uuid: str = "frontier_waypoint"
+    cls_uuid: str = "base_explorer"
 
     def __init__(
         self, sim: HabitatSim, config: "DictConfig", *args: Any, **kwargs: Any
@@ -101,7 +100,7 @@ class FrontierWaypoint(Sensor):
         self._agent_position, self._agent_heading = None, None
         if self._curr_ep_id != episode.episode_id:
             self._curr_ep_id = episode.episode_id
-            self._reset_maps()  # New episode, reset maps
+            self._reset()  # New episode, reset maps
 
         updated = self._update_fog_of_war_mask()
         if updated:  # look for new frontiers if the fog of war mask has changed
@@ -209,7 +208,7 @@ class FrontierWaypoint(Sensor):
             / maps.calculate_meters_per_pixel(self._map_resolution, sim=self._sim)
         )
 
-    def _reset_maps(self):
+    def _reset(self):
         self.top_down_map = maps.get_topdown_map_from_sim(
             self._sim,
             map_resolution=self._map_resolution,
@@ -253,8 +252,8 @@ class FrontierWaypoint(Sensor):
 
 
 @dataclass
-class FrontierWaypointSensorConfig(LabSensorConfig):
-    type: str = FrontierWaypoint.__name__
+class BaseExplorerSensorConfig(LabSensorConfig):
+    type: str = BaseExplorer.__name__
     # minimum unexplored area (in meters) needed adjacent to a frontier for that
     # frontier to be valid
     ang_vel: float = 10.0  # degrees per second
@@ -271,8 +270,8 @@ class FrontierWaypointSensorConfig(LabSensorConfig):
 
 cs = ConfigStore.instance()
 cs.store(
-    package=f"habitat.task.lab_sensors.{FrontierWaypoint.cls_uuid}",
+    package=f"habitat.task.lab_sensors.{BaseExplorer.cls_uuid}",
     group="habitat/task/lab_sensors",
-    name=f"{FrontierWaypoint.cls_uuid}",
-    node=FrontierWaypointSensorConfig,
+    name=f"{BaseExplorer.cls_uuid}",
+    node=BaseExplorerSensorConfig,
 )

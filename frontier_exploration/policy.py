@@ -3,7 +3,7 @@ from gym import spaces
 from habitat_baselines.common.baseline_registry import baseline_registry
 from habitat_baselines.rl.ppo import Policy
 
-from frontier_exploration.sensors import FrontierWaypoint
+from frontier_exploration.base_expert import BaseExplorer
 
 
 @baseline_registry.register_policy
@@ -34,7 +34,7 @@ class FrontierExplorationPolicy(Policy):
         deterministic=False,
     ):
         # Convert obs to torch.long
-        action = observations[FrontierWaypoint.cls_uuid].type(torch.long)
+        action = observations[BaseExplorer.cls_uuid].type(torch.long)
         return None, action, None, rnn_hidden_states
 
     # used in ppo_trainer.py eval:

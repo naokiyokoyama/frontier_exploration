@@ -3,7 +3,7 @@ try:
     import frontier_exploration.explorer
     import frontier_exploration.measurements
     import frontier_exploration.policy
-    import frontier_exploration.sensors
+    import frontier_exploration.base_expert
     import frontier_exploration.trainer
 except ModuleNotFoundError as e:
     # If the error was due to the habitat package not being installed, then pass, but
