@@ -12,6 +12,8 @@ class DummyAgent:
     def __init__(self, actor_critic):
         self.actor_critic = actor_critic
 
+    def load_state_dict(self, *args, **kwargs):
+        pass
 
 @baseline_registry.register_trainer(name="nonlearned_policy")
 class NonLearnedTrainer(PPOTrainer):
