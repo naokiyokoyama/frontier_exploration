@@ -1,3 +1,4 @@
+import habitat_sim
 import numpy as np
 from numba import njit
 
@@ -8,7 +9,7 @@ from frontier_exploration.utils.general_utils import wrap_heading
 def completion_time_heuristic(
     sim_waypoints, agent_position, agent_heading, lin_vel, ang_vel
 ):
-    """ An admissible, consistent heuristic for finding the completion time of an
+    """An admissible, consistent heuristic for finding the completion time of an
     obstacle-free path to a waypoint. For each waypoint, this returns the shortest
     amount of time it would take to reach that waypoint from the agent's current
     position and heading assuming NO obstacles, serving as a lower bound on the actual
@@ -26,7 +27,7 @@ def completion_time_heuristic(
 
 @njit
 def euclidean_heuristic(sim_waypoints, agent_position):
-    """ An admissible, consistent heuristic for finding the length of the shortest
+    """An admissible, consistent heuristic for finding the length of the shortest
     obstacle-free path to a waypoint. For each waypoint, this returns its euclidean
     distance from the agent's position, serving as a lower bound on the actual
     length of the shortest obstacle-free path."""
@@ -60,3 +61,58 @@ def shortest_path_completion_time(path, max_lin_vel, max_ang_vel, yaw_diff):
         cur_yaw = target_yaw
 
     return time
+
+
+def heading_error(
+    agent_position: np.ndarray, position: np.ndarray, agent_heading: np.ndarray
+) -> float:
+    heading_to_waypoint = np.arctan2(
+        position[2] - agent_position[2], position[0] - agent_position[0]
+    )
+    agent_heading = wrap_heading(np.pi / 2.0 - agent_heading)
+    heading_error = wrap_heading(heading_to_waypoint - agent_heading)
+    return heading_error
+
+
+def get_path(start, end, sim):
+    shortest_path = habitat_sim.nav.ShortestPath()
+    shortest_path.requested_start = start
+    shortest_path.requested_end = end
+    if not sim.pathfinder.find_path(shortest_path):
+        return None
+    return shortest_path
+
+
+def path_dist_cost(start, end, sim):
+    path = get_path(start, end, sim)
+    if path is None:
+        return np.inf
+    cost = path.geodesic_distance
+    return cost
+
+
+def path_time_cost(end, start, start_heading, lin_vel, ang_vel, sim):
+    path = get_path(start, end, sim)
+    if path is None:
+        return np.inf
+    path_points = np.array(path.points)
+    heading_err = heading_error(start, path_points[1], start_heading)
+    cost = shortest_path_completion_time(
+        path_points, lin_vel, ang_vel, np.abs(heading_err)
+    )
+    return cost
+
+
+def a_star_search(candidates, heuristic_fn, cost_fn):
+    heuristics = heuristic_fn(candidates)
+    sorted_inds = np.argsort(heuristics)
+    min_cost = np.inf
+    best_idx = None
+    for idx in sorted_inds:
+        if heuristics[idx] > min_cost:
+            break
+        cost = cost_fn(candidates[idx])
+        if cost < min_cost:
+            min_cost = cost
+            best_idx = idx
+    return best_idx, min_cost

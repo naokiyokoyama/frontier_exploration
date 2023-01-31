@@ -12,15 +12,22 @@ from habitat.utils.visualizations import fog_of_war, maps
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig
 
-from frontier_exploration.explorer import detect_frontier_waypoints
-from frontier_exploration.utils.general_utils import wrap_heading
+from frontier_exploration.frontier_detection import detect_frontier_waypoints
 from frontier_exploration.utils.path_utils import (
+    a_star_search,
     completion_time_heuristic,
     euclidean_heuristic,
-    shortest_path_completion_time,
+    heading_error,
+    path_dist_cost,
+    path_time_cost,
 )
 
-STOP, MOVE_FORWARD, TURN_LEFT, TURN_RIGHT = 0, 1, 2, 3
+
+class ActionIDs:
+    STOP = 0
+    MOVE_FORWARD = 1
+    TURN_LEFT = 2
+    TURN_RIGHT = 3
 
 
 @registry.register_sensor
@@ -52,7 +59,7 @@ class BaseExplorer(Sensor):
         self.closest_frontier_waypoint = None
         self.top_down_map = None
         self.fog_of_war_mask = None
-        self.frontier_waypoints = []
+        self.frontier_waypoints = np.array([])
 
         self._area_thresh_in_pixels = None
         self._visibility_dist_in_pixels = None
@@ -97,19 +104,20 @@ class BaseExplorer(Sensor):
     def get_observation(
         self, task: EmbodiedTask, episode, *args: Any, **kwargs: Any
     ) -> np.ndarray:
+        self._pre_step(episode)
+        self._update_frontiers()
+        self.closest_frontier_waypoint = self._get_closest_waypoint()
+        if self.closest_frontier_waypoint is None:  # no navigable frontiers detected
+            return np.array([ActionIDs.STOP], dtype=np.int)
+
+        action = self._decide_action(self.closest_frontier_waypoint)
+        return action
+
+    def _pre_step(self, episode):
         self._agent_position, self._agent_heading = None, None
         if self._curr_ep_id != episode.episode_id:
             self._curr_ep_id = episode.episode_id
-            self._reset()  # New episode, reset maps
-
-        updated = self._update_fog_of_war_mask()
-        if updated:  # look for new frontiers if the fog of war mask has changed
-            self.closest_frontier_waypoint = self._get_frontier_waypoint()
-        if self.closest_frontier_waypoint is None:  # no navigable frontiers detected
-            return np.array([STOP], dtype=np.int)
-
-        self._next_waypoint = self._get_next_waypoint(self.closest_frontier_waypoint)
-        return self._decide_action(self._next_waypoint)
+            self._reset(episode)  # New episode, reset maps
 
     def _update_fog_of_war_mask(self):
         orig = self.fog_of_war_mask.copy()
@@ -124,20 +132,18 @@ class BaseExplorer(Sensor):
         updated = not np.array_equal(orig, self.fog_of_war_mask)
         return updated
 
-    def _get_frontier_waypoint(self):
-        # Get waypoint to closest frontier
-        frontier_waypoints = detect_frontier_waypoints(
-            self.top_down_map,
-            self.fog_of_war_mask,
-            self._area_thresh_in_pixels,
-            xy=self._get_agent_pixel_coords(),
-        )
-        if len(frontier_waypoints) == 0:
-            return None
-        # frontiers are in (y, x) format, so we need to do some swapping
-        self.frontier_waypoints = frontier_waypoints[:, ::-1]
-        closest_frontier_waypoint = self._get_closest_waypoint(self.frontier_waypoints)
-        return closest_frontier_waypoint
+    def _update_frontiers(self):
+        updated = self._update_fog_of_war_mask()
+        if updated:
+            self.frontier_waypoints = detect_frontier_waypoints(
+                self.top_down_map,
+                self.fog_of_war_mask,
+                self._area_thresh_in_pixels,
+                # xy=self._get_agent_pixel_coords(),
+            )
+            if len(self.frontier_waypoints) > 0:
+                # frontiers are in (y, x) format, so we need to do some swapping
+                self.frontier_waypoints = self.frontier_waypoints[:, ::-1]
 
     def _get_next_waypoint(self, frontier_waypoint: np.ndarray):
         shortest_path = habitat_sim.nav.ShortestPath()
@@ -147,57 +153,46 @@ class BaseExplorer(Sensor):
         next_waypoint = shortest_path.points[1]
         return next_waypoint
 
-    def _get_closest_waypoint(self, waypoints: np.ndarray) -> np.ndarray:
-        sim_waypoints = self._pixel_to_map_coors(waypoints)
+    def _get_closest_waypoint(self):
+        if len(self.frontier_waypoints) == 0:
+            return None
+        sim_waypoints = self._pixel_to_map_coors(self.frontier_waypoints)
+
         if self._minimize_time:
-            heuristics = completion_time_heuristic(
-                sim_waypoints,
+            heuristic_fn = lambda x: completion_time_heuristic(
+                x,
                 self.agent_position,
                 self.agent_heading,
                 self._lin_vel,
                 self._ang_vel,
             )
+            cost_fn = lambda x: path_time_cost(
+                x,
+                self.agent_position,
+                self._agent_heading,
+                self._lin_vel,
+                self._ang_vel,
+                self._sim,
+            )
         else:
-            heuristics = euclidean_heuristic(sim_waypoints, self.agent_position)
-        sorted_inds = np.argsort(heuristics)
-        min_cost = np.inf
-        closest_waypoint = None
-        for idx in sorted_inds:
-            if heuristics[idx] > min_cost:
-                break
-            shortest_path = habitat_sim.nav.ShortestPath()
-            shortest_path.requested_start = self.agent_position
-            shortest_path.requested_end = sim_waypoints[idx]
-            if not self._sim.pathfinder.find_path(shortest_path):
-                continue
-            path = np.array(shortest_path.points)
-            if self._minimize_time:
-                heading_error = self._heading_error(path[1])
-                cost = shortest_path_completion_time(
-                    path, self._lin_vel, self._ang_vel, np.abs(heading_error)
-                )
-            else:
-                cost = shortest_path.geodesic_distance
-            if cost < min_cost:
-                min_cost = cost
-                closest_waypoint = waypoints[idx]
-        return closest_waypoint
+            heuristic_fn = lambda x: euclidean_heuristic(x, self.agent_position)
+            cost_fn = lambda x: path_dist_cost(x, self.agent_position, self._sim)
 
-    def _decide_action(self, next_waypoint: np.ndarray) -> np.ndarray:
-        heading_error = self._heading_error(next_waypoint)
-        if heading_error > self._turn_angle:
-            return np.array([TURN_RIGHT], dtype=np.int)
-        elif heading_error < -self._turn_angle:
-            return np.array([TURN_LEFT], dtype=np.int)
-        return np.array([MOVE_FORWARD], dtype=np.int)
+        idx, _ = a_star_search(sim_waypoints, heuristic_fn, cost_fn)
+
+        return self.frontier_waypoints[idx]
+
+    def _decide_action(self, target: np.ndarray) -> np.ndarray:
+        self._next_waypoint = self._get_next_waypoint(target)
+        heading_err = self._heading_error(self._next_waypoint)
+        if heading_err > self._turn_angle / 2:
+            return np.array([ActionIDs.TURN_RIGHT], dtype=np.int)
+        elif heading_err < -self._turn_angle / 2:
+            return np.array([ActionIDs.TURN_LEFT], dtype=np.int)
+        return np.array([ActionIDs.MOVE_FORWARD], dtype=np.int)
 
     def _heading_error(self, position: np.ndarray) -> float:
-        heading_to_waypoint = np.arctan2(
-            position[2] - self.agent_position[2], position[0] - self.agent_position[0]
-        )
-        agent_heading = wrap_heading(np.pi / 2.0 - self.agent_heading)
-        heading_error = wrap_heading(heading_to_waypoint - agent_heading)
-        return heading_error
+        return heading_error(self.agent_position, position, self.agent_heading)
 
     def _get_agent_pixel_coords(self) -> np.ndarray:
         return self._map_coors_to_pixel(self.agent_position)
@@ -208,7 +203,7 @@ class BaseExplorer(Sensor):
             / maps.calculate_meters_per_pixel(self._map_resolution, sim=self._sim)
         )
 
-    def _reset(self):
+    def _reset(self, *args, **kwargs):
         self.top_down_map = maps.get_topdown_map_from_sim(
             self._sim,
             map_resolution=self._map_resolution,

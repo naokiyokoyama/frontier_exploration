@@ -3,7 +3,8 @@ from gym import spaces
 from habitat_baselines.common.baseline_registry import baseline_registry
 from habitat_baselines.rl.ppo import Policy
 
-from frontier_exploration.base_expert import BaseExplorer
+from frontier_exploration.base_explorer import BaseExplorer
+from frontier_exploration.objnav_explorer import ObjNavExplorer
 
 
 @baseline_registry.register_policy
@@ -34,7 +35,15 @@ class FrontierExplorationPolicy(Policy):
         deterministic=False,
     ):
         # Convert obs to torch.long
-        action = observations[BaseExplorer.cls_uuid].type(torch.long)
+        if BaseExplorer.cls_uuid in observations:
+            sensor_uuid = BaseExplorer.cls_uuid
+        elif ObjNavExplorer.cls_uuid in observations:
+            sensor_uuid = ObjNavExplorer.cls_uuid
+        else:
+            raise RuntimeError(
+                "FrontierExplorationPolicy needs BaseExplorer or ObjNavExplorer sensor"
+            )
+        action = observations[sensor_uuid].type(torch.long)
         return None, action, None, rnn_hidden_states
 
     # used in ppo_trainer.py eval:
