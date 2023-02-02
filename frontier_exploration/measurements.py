@@ -34,23 +34,21 @@ class FrontierExplorationMap(TopDownMap):
         explorer_config = task._config.lab_sensors[self._explorer_uuid]
         with read_write(config):
             config.map_resolution = explorer_config.map_resolution
-        self._frontier_exploration_sensor = None
+        self._explorer_sensor = None
         super().__init__(sim, config, *args, **kwargs)
 
     def reset_metric(
         self, episode: NavigationEpisode, *args: Any, **kwargs: Any
     ) -> None:
         assert "task" in kwargs, "task must be passed to reset_metric!"
-        self._frontier_exploration_sensor = kwargs["task"].sensor_suite.sensors[
-            self._explorer_uuid
-        ]
+        self._explorer_sensor = kwargs["task"].sensor_suite.sensors[self._explorer_uuid]
         super().reset_metric(episode, *args, **kwargs)
 
     def get_original_map(self):
-        return self._frontier_exploration_sensor.top_down_map.copy()
+        return self._explorer_sensor.top_down_map.copy()
 
     def update_fog_of_war_mask(self, agent_position):
-        self._fog_of_war_mask = self._frontier_exploration_sensor.fog_of_war_mask.copy()
+        self._fog_of_war_mask = self._explorer_sensor.fog_of_war_mask.copy()
 
     def update_metric(self, episode, action, *args: Any, **kwargs: Any):
         super().update_metric(episode, action, *args, **kwargs)
@@ -58,15 +56,27 @@ class FrontierExplorationMap(TopDownMap):
         new_map = self._metric["map"].copy()
         circle_size = 20 * self._map_resolution // 1024
         thickness = max(int(round(3 * self._map_resolution / 1024)), 1)
-        for waypoint in self._frontier_exploration_sensor.frontier_waypoints:
-            if np.array_equal(
-                waypoint, self._frontier_exploration_sensor.closest_frontier_waypoint
+        selected_frontier = self._explorer_sensor.closest_frontier_waypoint
+        for waypoint in self._explorer_sensor.frontier_waypoints:
+            if selected_frontier is not None and np.array_equal(
+                waypoint, selected_frontier
             ):
                 color = (255, 0, 0)
             else:
                 color = (0, 255, 255)
             cv2.circle(new_map, waypoint[::-1].astype(np.int), circle_size, color, -1)
-        next_waypoint = self._frontier_exploration_sensor.next_waypoint_pixels
+
+        beeline_target = getattr(self._explorer_sensor, "beeline_target_pixels", None)
+        if beeline_target is not None:
+            cv2.circle(
+                new_map,
+                beeline_target[::-1].astype(np.int),
+                circle_size * 2,
+                (255, 0, 0),
+                thickness * 2,
+            )
+
+        next_waypoint = self._explorer_sensor.next_waypoint_pixels
         if next_waypoint is not None:
             cv2.circle(
                 new_map,
