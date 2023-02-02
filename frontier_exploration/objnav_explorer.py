@@ -41,24 +41,34 @@ class ObjNavExplorer(BaseExplorer):
             for view_point in goal.view_points
         ]
 
+    @property
+    def beeline_target_pixels(self):
+        # This property is used by the FrontierExplorationMap measurement
+        if self._beeline_target is None:
+            return None
+        return self._map_coors_to_pixel(self._beeline_target)
+
     def get_observation(
         self, task: EmbodiedTask, episode, *args: Any, **kwargs: Any
     ) -> np.ndarray:
+        super()._pre_step(episode)
         if self._beeline_target is None:
             return super().get_observation(task, episode, *args, **kwargs)
-        super()._pre_step(episode)
-        action = self._decide_action(self._beeline_target)
+        action = self._decide_action(self._beeline_target, stop_at_goal=True)
         return action
 
     def _update_fog_of_war_mask(self):
         updated = super()._update_fog_of_war_mask()
         # Turn on beelining if any targets have been spotted
         if updated and self._beeline_target is None:
-            heuristic_fn = lambda x: euclidean_heuristic(np.array(x), self.agent_position)
+            heuristic_fn = lambda x: euclidean_heuristic(
+                np.array(x), self.agent_position
+            )
             cost_fn = lambda x: path_dist_cost(x, self.agent_position, self._sim)
             idx, cost = a_star_search(self._episode_view_points, heuristic_fn, cost_fn)
             if cost < self._success_distance:
-                self._beeline_target = self._episode_view_points[idx]
+                self._beeline_target = np.array(self._episode_view_points[idx])
+                self.closest_frontier_waypoint = None
         return updated
 
 

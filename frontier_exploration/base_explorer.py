@@ -142,10 +142,13 @@ class BaseExplorer(Sensor):
                 # frontiers are in (y, x) format, so we need to do some swapping
                 self.frontier_waypoints = self.frontier_waypoints[:, ::-1]
 
-    def _get_next_waypoint(self, frontier_waypoint: np.ndarray):
+    def _get_next_waypoint(self, goal: np.ndarray):
         shortest_path = habitat_sim.nav.ShortestPath()
         shortest_path.requested_start = self.agent_position
-        shortest_path.requested_end = self._pixel_to_map_coors(frontier_waypoint)
+        if len(goal) == 2:
+            shortest_path.requested_end = self._pixel_to_map_coors(goal)
+        else:
+            shortest_path.requested_end = goal
         assert self._sim.pathfinder.find_path(shortest_path), "Could not find path!"
         next_waypoint = shortest_path.points[1]
         return next_waypoint
@@ -179,13 +182,19 @@ class BaseExplorer(Sensor):
 
         return self.frontier_waypoints[idx]
 
-    def _decide_action(self, target: np.ndarray) -> np.ndarray:
+    def _decide_action(self, target: np.ndarray, stop_at_goal=False) -> np.ndarray:
+        if target is None:
+            return np.array([ActionIDs.STOP], dtype=np.int)
         self._next_waypoint = self._get_next_waypoint(target)
         heading_err = self._heading_error(self._next_waypoint)
-        if heading_err > self._turn_angle / 2:
+        if heading_err > self._turn_angle:
             return np.array([ActionIDs.TURN_RIGHT], dtype=np.int)
-        elif heading_err < -self._turn_angle / 2:
+        elif heading_err < -self._turn_angle:
             return np.array([ActionIDs.TURN_LEFT], dtype=np.int)
+        if stop_at_goal:
+            target_3d = self._pixel_to_map_coors(target) if len(target) == 2 else target
+            if self._success_distance > np.linalg.norm(self.agent_position - target_3d):
+                return np.array([ActionIDs.STOP], dtype=np.int)
         return np.array([ActionIDs.MOVE_FORWARD], dtype=np.int)
 
     def _heading_error(self, position: np.ndarray) -> float:
@@ -256,7 +265,7 @@ class BaseExplorerSensorConfig(LabSensorConfig):
     lin_vel: float = 0.25  # meters per second
     map_resolution: int = 1024
     minimize_time: bool = True
-    success_distance: float = 0.1  # meters
+    success_distance: float = 0.18  # meters
     turn_angle: float = 10.0  # degrees
     visibility_dist: float = 5.0  # in meters
 
