@@ -107,9 +107,6 @@ class BaseExplorer(Sensor):
         self._pre_step(episode)
         self._update_frontiers()
         self.closest_frontier_waypoint = self._get_closest_waypoint()
-        if self.closest_frontier_waypoint is None:  # no navigable frontiers detected
-            return np.array([ActionIDs.STOP], dtype=np.int)
-
         action = self._decide_action(self.closest_frontier_waypoint)
         return action
 
@@ -216,6 +213,7 @@ class BaseExplorer(Sensor):
         self._visibility_dist_in_pixels = self._convert_meters_to_pixel(
             self._visibility_dist
         )
+        self.closest_frontier_waypoint = None
         self._next_waypoint = None
 
     def _pixel_to_map_coors(self, pixel: np.ndarray) -> np.ndarray:
