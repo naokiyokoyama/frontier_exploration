@@ -1,3 +1,4 @@
+import random
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,10 +25,10 @@ from frontier_exploration.utils.path_utils import (
 
 
 class ActionIDs:
-    STOP = 0
-    MOVE_FORWARD = 1
-    TURN_LEFT = 2
-    TURN_RIGHT = 3
+    STOP = np.array([0])
+    MOVE_FORWARD = np.array([1])
+    TURN_LEFT = np.array([2])
+    TURN_RIGHT = np.array([3])
 
 
 @registry.register_sensor
@@ -67,6 +68,26 @@ class BaseExplorer(Sensor):
         self._agent_heading = None
         self._curr_ep_id = None
         self._next_waypoint = None
+        self._default_dir = None
+        self._first_frontier = False  # whether any frontiers have been found at all yet
+
+    def _reset(self, *args, **kwargs):
+        self.top_down_map = maps.get_topdown_map_from_sim(
+            self._sim,
+            map_resolution=self._map_resolution,
+            draw_border=False,
+        )
+        self.fog_of_war_mask = np.zeros_like(self.top_down_map)
+        self._area_thresh_in_pixels = self._convert_meters_to_pixel(
+            self._area_thresh ** 2
+        )
+        self._visibility_dist_in_pixels = self._convert_meters_to_pixel(
+            self._visibility_dist
+        )
+        self.closest_frontier_waypoint = None
+        self._next_waypoint = None
+        self._default_dir = None
+        self._first_frontier = False
 
     def _get_uuid(self, *args: Any, **kwargs: Any) -> str:
         return self.cls_uuid
@@ -75,12 +96,7 @@ class BaseExplorer(Sensor):
         return SensorTypes.TENSOR
 
     def _get_observation_space(self, *args: Any, **kwargs: Any) -> Space:
-        return spaces.Box(
-            low=0,
-            high=255,
-            shape=(1,),
-            dtype=np.uint8,
-        )
+        return spaces.Box(low=0, high=255, shape=(1,), dtype=np.uint8)
 
     @property
     def agent_position(self):
@@ -179,19 +195,31 @@ class BaseExplorer(Sensor):
             cost_fn = lambda x: path_dist_cost(x, self.agent_position, self._sim)
 
         idx, _ = a_star_search(sim_waypoints, heuristic_fn, cost_fn)
+        if idx is None:
+            return None
 
         return self.frontier_waypoints[idx]
 
     def _decide_action(self, target: np.ndarray) -> np.ndarray:
         if target is None:
-            return np.array([ActionIDs.STOP], dtype=np.int)
+            if not self._first_frontier:
+                # If no frontiers have ever been found, likely just need to spin around
+                if self._default_dir is None:
+                    # Randomly select between LEFT or RIGHT
+                    self._default_dir = bool(random.getrandbits(1))
+                act = ActionIDs.TURN_LEFT if self._default_dir else ActionIDs.TURN_RIGHT
+                return act
+            # If frontiers have been found but now there are no more, stop
+            return ActionIDs.STOP
+        self._first_frontier = True
+
         self._next_waypoint = self._get_next_waypoint(target)
         heading_err = self._heading_error(self._next_waypoint)
         if heading_err > self._turn_angle:
-            return np.array([ActionIDs.TURN_RIGHT], dtype=np.int)
+            return ActionIDs.TURN_RIGHT
         elif heading_err < -self._turn_angle:
-            return np.array([ActionIDs.TURN_LEFT], dtype=np.int)
-        return np.array([ActionIDs.MOVE_FORWARD], dtype=np.int)
+            return ActionIDs.TURN_LEFT
+        return ActionIDs.MOVE_FORWARD
 
     def _heading_error(self, position: np.ndarray) -> float:
         return heading_error(self.agent_position, position, self.agent_heading)
@@ -204,22 +232,6 @@ class BaseExplorer(Sensor):
             meters
             / maps.calculate_meters_per_pixel(self._map_resolution, sim=self._sim)
         )
-
-    def _reset(self, *args, **kwargs):
-        self.top_down_map = maps.get_topdown_map_from_sim(
-            self._sim,
-            map_resolution=self._map_resolution,
-            draw_border=False,
-        )
-        self.fog_of_war_mask = np.zeros_like(self.top_down_map)
-        self._area_thresh_in_pixels = self._convert_meters_to_pixel(
-            self._area_thresh ** 2
-        )
-        self._visibility_dist_in_pixels = self._convert_meters_to_pixel(
-            self._visibility_dist
-        )
-        self.closest_frontier_waypoint = None
-        self._next_waypoint = None
 
     def _pixel_to_map_coors(self, pixel: np.ndarray) -> np.ndarray:
         if pixel.ndim == 1:
