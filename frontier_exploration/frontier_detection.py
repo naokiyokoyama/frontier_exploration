@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 from numba import njit
 
+from frontier_exploration.utils.bresenham_line import bresenhamline
 from frontier_exploration.utils.frontier_utils import closest_line_segment
 
 VISUALIZE = os.environ.get("MAP_VISUALIZE", "False").lower() == "true"
@@ -71,7 +72,7 @@ def detect_frontiers(
         full_map, explored_mask, area_thresh
     )
     contours, _ = cv2.findContours(
-        filtered_explored_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        filtered_explored_mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
     )
     if VISUALIZE:
         img = cv2.cvtColor(full_map * 255, cv2.COLOR_GRAY2BGR)
@@ -87,7 +88,9 @@ def detect_frontiers(
     frontiers = []
     # TODO: There shouldn't be more than one contour (only one explored area on map)
     for contour in contours:
-        frontiers.extend(contour_to_frontiers(contour, unexplored_mask))
+        frontiers.extend(
+            contour_to_frontiers(interpolate_contour(contour), unexplored_mask)
+        )
     return frontiers
 
 
@@ -105,10 +108,48 @@ def filter_out_small_unexplored(
     )
     # Add small unexplored areas to the explored map
     new_explored_mask = explored_mask.copy()
+    small_contours = []
     for contour in contours:
         if cv2.contourArea(contour) < area_thresh:
-            cv2.drawContours(new_explored_mask, [contour], -1, 255, -1)
+            small_contours.append(contour)
+    cv2.drawContours(new_explored_mask, small_contours, -1, 255, -1)
+
+    if VISUALIZE and len(small_contours) > 0:
+        # Draw the full map and the new explored mask, then outline the contours that
+        # were added to the explored mask
+        img = cv2.cvtColor(full_map * 255, cv2.COLOR_GRAY2BGR)
+        img[new_explored_mask > 0] = (127, 127, 127)
+        cv2.drawContours(img, small_contours, -1, (0, 0, 255), 3)
+        cv2.imshow("small unexplored areas", img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
     return new_explored_mask
+
+
+def interpolate_contour(contour):
+    """Given a cv2 contour, this function will add points in between each pair of
+    points in the contour using the bresenham algorithm to make the contour more
+    continuous.
+    :param contour: A cv2 contour of shape (N, 1, 2)
+    :return:
+    """
+    # First, reshape and expand the frontier to be a 2D array of shape (N-1, 2, 2)
+    # representing line segments between adjacent points
+    line_segments = np.concatenate((contour[:-1], contour[1:]), axis=1).reshape(
+        (-1, 2, 2)
+    )
+    # Also add a segment connecting the last point to the first point
+    line_segments = np.concatenate(
+        (line_segments, np.array([contour[-1], contour[0]]).reshape((1, 2, 2)))
+    )
+    pts = []
+    for (x0, y0), (x1, y1) in line_segments:
+        pts.append(
+            bresenhamline(np.array([[x0, y0]]), np.array([[x1, y1]]), max_iter=-1)
+        )
+    pts = np.concatenate(pts).reshape((-1, 1, 2))
+    return pts
 
 
 @njit
@@ -125,25 +166,26 @@ def contour_to_frontiers(contour, unexplored_mask):
         if unexplored_mask[y, x] == 0:
             bad_inds.append(idx)
     frontiers = np.split(contour, bad_inds)
-    # np.split is fast but does NOT remove the element at the split index, so we need to
-    # remove the first element of each array after the first array. Filter out arrays
-    # that only have one point (i.e., just containing a split element).
+    # np.split is fast but does NOT remove the element at the split index
     filtered_frontiers = []
+    front_last_split = (
+        0 not in bad_inds
+        and len(bad_inds) > 0
+        and max(bad_inds) < num_contour_points - 2
+    )
     for idx, f in enumerate(frontiers):
-        if len(f) > 1:
+        # a frontier must have at least 2 points (3 with bad ind)
+        if len(f) > 2 or (idx == 0 and front_last_split):
             if idx == 0:
                 filtered_frontiers.append(f)
-            elif len(f) > 2:  # a frontier must have at least 2 points (3 with bad ind)
+            else:
                 filtered_frontiers.append(f[1:])
     # Combine the first and last frontier if the first point of the first frontier and
     # the last point of the last frontier are the first and last points of the original
     # contour. Only check if there are at least 2 frontiers.
-    if len(filtered_frontiers) > 1:
-        first = filtered_frontiers[0][0]
-        last = filtered_frontiers[-1][-1]
-        if np.array_equal(first, contour[0]) and np.array_equal(last, contour[-1]):
-            last_frontier = filtered_frontiers.pop()
-            filtered_frontiers[0] = np.concatenate((last_frontier, filtered_frontiers[0]))
+    if len(filtered_frontiers) > 1 and front_last_split:
+        last_frontier = filtered_frontiers.pop()
+        filtered_frontiers[0] = np.concatenate((last_frontier, filtered_frontiers[0]))
     return filtered_frontiers
 
 
@@ -172,7 +214,7 @@ def get_frontier_midpoint(frontier) -> np.ndarray:
     """Given a list of contiguous points (numpy arrays) representing a frontier, first
     calculate the total length of the frontier, then find the midpoint of the
     frontier"""
-    # First, reshape and expand the frontier to be a 2D array of shape (X, 2)
+    # First, reshape and expand the frontier to be a 2D array of shape (X, 2, 2)
     # representing line segments between adjacent points
     line_segments = np.concatenate((frontier[:-1], frontier[1:]), axis=1).reshape(
         (-1, 2, 2)
