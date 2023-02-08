@@ -6,6 +6,7 @@ try:
     import frontier_exploration.base_explorer
     import frontier_exploration.objnav_explorer
     import frontier_exploration.trainer
+    import frontier_exploration.utils.multistory_episode_finder
 except ModuleNotFoundError as e:
     # If the error was due to the habitat package not being installed, then pass, but
     # print a warning. Do not pass if it was due to another package being missing.
