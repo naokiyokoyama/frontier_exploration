@@ -105,10 +105,10 @@ class ObjNavExplorer(BaseExplorer):
         agent_yaw = 2 * np.arctan2(agent_rot.y, agent_rot.w)
         heading_err = -wrap_heading(self._target_yaw - agent_yaw)
         if heading_err > self._turn_angle / 2:
-            return np.array([ActionIDs.TURN_RIGHT], dtype=np.int)
+            return ActionIDs.TURN_RIGHT
         elif heading_err < -self._turn_angle / 2:
-            return np.array([ActionIDs.TURN_LEFT], dtype=np.int)
-        return np.array([ActionIDs.STOP], dtype=np.int)
+            return ActionIDs.TURN_LEFT
+        return ActionIDs.STOP
 
     def identify_closest_viewpoint(self):
         """Returns the viewpoint closest to the agent"""
