@@ -1,5 +1,6 @@
 import hashlib
 import os
+import os.path as osp
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,7 +12,7 @@ from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig
 
-HASH_KEYS = ["episode_id", "scene_id", "start_position", "start_rotation"]
+HASH_KEYS = ["scene_id", "start_position", "start_rotation"]
 
 
 @registry.register_sensor
@@ -27,7 +28,8 @@ class MultistoryEpisodeFinder(Sensor):
         self._config = config
         self._output_dir = config.output_dir
         self.first = True
-        os.makedirs(self._output_dir, exist_ok=True)
+        for i in ["multi_story", "single_story"]:
+            os.makedirs(osp.join(self._output_dir, i), exist_ok=True)
 
     def _get_uuid(self, *args: Any, **kwargs: Any) -> str:
         return self.cls_uuid
@@ -44,12 +46,18 @@ class MultistoryEpisodeFinder(Sensor):
         if self.first:
             self.first = False
             return np.array([1], dtype=np.uint8)
-        if self.episode_is_multistory(episode):
-            hash_str = ":".join([str(getattr(episode, k)) for k in HASH_KEYS])
-            basename = hashlib.sha224(hash_str.encode("ASCII")).hexdigest()
-            filename = f"{self._output_dir}/{basename}.txt"
-            with open(filename, "w") as f:
-                f.write(hash_str)
+
+        hash_values = [getattr(episode, k) for k in HASH_KEYS]
+        hash_values[0] = osp.basename(hash_values[0])
+        hash_str = ":".join([str(i) for i in hash_values])
+        basename = hashlib.sha224(hash_str.encode("ASCII")).hexdigest()
+
+        story_type = (
+            "multi_story" if self.episode_is_multistory(episode) else "single_story"
+        )
+        filename = f"{self._output_dir}/{story_type}/{basename}.txt"
+        with open(filename, "w") as f:
+            f.write(hash_str)
 
         task.is_stop_called = True
         self.first = True
@@ -76,7 +84,7 @@ class MultistoryEpisodeFinder(Sensor):
                 return False
         return True
 
-    def _is_on_same_floor(self, height, ceiling_height=2.0):
+    def _is_on_same_floor(self, height, ceiling_height=0.5):
         ref_floor_height = self._sim.get_agent(0).state.position[1]
         return ref_floor_height <= height < ref_floor_height + ceiling_height
 
@@ -84,7 +92,7 @@ class MultistoryEpisodeFinder(Sensor):
 @dataclass
 class MultistoryEpisodeFinderSensorConfig(LabSensorConfig):
     type: str = MultistoryEpisodeFinder.__name__
-    output_dir: str = "data/multistory_episodes/train"
+    output_dir: str = "data/multistory_episodes"
 
 
 cs = ConfigStore.instance()
