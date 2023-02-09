@@ -96,6 +96,8 @@ def path_time_cost(end, start, start_heading, lin_vel, ang_vel, sim):
     if path is None:
         return np.inf
     path_points = np.array(path.points)
+    if len(path_points) < 2:
+        return np.inf
     heading_err = heading_error(start, path_points[1], start_heading)
     cost = shortest_path_completion_time(
         path_points, lin_vel, ang_vel, np.abs(heading_err)
