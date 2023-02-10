@@ -7,6 +7,7 @@ import os.path as osp
 from habitat import get_config
 from habitat.config import read_write
 from habitat_baselines.run import execute_exp
+from omegaconf import OmegaConf
 
 DEBUG_OPTIONS = {
     "habitat_baselines.tensorboard_dir": os.environ["JUNK"],
@@ -74,6 +75,7 @@ def main():
             args.opts.append(f"{k}={v}")
 
     config = get_config(args.exp_config, args.opts)
+    # print(OmegaConf.to_yaml(config))
 
     if args.blind:
         with read_write(config):
