@@ -27,7 +27,6 @@ class MultistoryEpisodeFinder(Sensor):
         self._sim = sim
         self._config = config
         self._output_dir = config.output_dir
-        self.first = True
         for i in ["multi_story", "single_story"]:
             os.makedirs(osp.join(self._output_dir, i), exist_ok=True)
 
@@ -43,10 +42,6 @@ class MultistoryEpisodeFinder(Sensor):
     def get_observation(
         self, task: EmbodiedTask, episode, *args: Any, **kwargs: Any
     ) -> np.ndarray:
-        if self.first:
-            self.first = False
-            return np.array([1], dtype=np.uint8)
-
         hash_values = [getattr(episode, k) for k in HASH_KEYS]
         hash_values[0] = osp.basename(hash_values[0])
         hash_str = ":".join([str(i) for i in hash_values])
@@ -60,7 +55,6 @@ class MultistoryEpisodeFinder(Sensor):
             f.write(hash_str)
 
         task.is_stop_called = True
-        self.first = True
         return np.array([0], dtype=np.uint8)
 
     def episode_is_multistory(self, episode):
@@ -75,13 +69,22 @@ class MultistoryEpisodeFinder(Sensor):
         ]
         agent_position = self._sim.get_agent_state().position
         for g in goal_positions:
+            # Skip this goal if it isn't even on the same floor as the agent
+            if not self._is_on_same_floor(self._sim.pathfinder.snap_point(g)[1]):
+                continue
+
             self._sim.geodesic_distance(agent_position, g, episode)
-            # Last point hasn't been snapepd yet
-            pts = episode._shortest_path_cache.points[:-1]
-            last = self._sim.pathfinder.snap_point(pts[-1])
-            pts.append(last)
-            if all(self._is_on_same_floor(p[1]) for p in pts):
-                return False
+            pts = episode._shortest_path_cache.points
+            if len(pts) >= 2:
+                # Last point hasn't been snapepd yet
+                pts = pts[:-1] + [self._sim.pathfinder.snap_point(pts[-1])]
+                is_single_story = True
+                for p in pts:
+                    if not self._is_on_same_floor(p[1]):
+                        is_single_story = False
+                        break
+                if is_single_story:
+                    return False
         return True
 
     def _is_on_same_floor(self, height, ceiling_height=0.5):
@@ -89,10 +92,33 @@ class MultistoryEpisodeFinder(Sensor):
         return ref_floor_height <= height < ref_floor_height + ceiling_height
 
 
+@registry.register_sensor
+class DummyExplorer(Sensor):
+    cls_uuid: str = "base_explorer"
+
+    def _get_uuid(self, *args: Any, **kwargs: Any) -> str:
+        return self.cls_uuid
+
+    def _get_sensor_type(self, *args: Any, **kwargs: Any) -> SensorTypes:
+        return SensorTypes.TENSOR
+
+    def _get_observation_space(self, *args: Any, **kwargs: Any) -> Space:
+        return spaces.Box(low=0, high=255, shape=(1,), dtype=np.uint8)
+
+    def get_observation(
+        self, task: EmbodiedTask, episode, *args: Any, **kwargs: Any
+    ) -> np.ndarray:
+        return np.array([0], dtype=np.uint8)
+
+
 @dataclass
 class MultistoryEpisodeFinderSensorConfig(LabSensorConfig):
     type: str = MultistoryEpisodeFinder.__name__
     output_dir: str = "data/multistory_episodes"
+
+@dataclass
+class DummyExplorerSensorConfig(LabSensorConfig):
+    type: str = DummyExplorer.__name__
 
 
 cs = ConfigStore.instance()
@@ -101,4 +127,13 @@ cs.store(
     group="habitat/task/lab_sensors",
     name=f"{MultistoryEpisodeFinder.cls_uuid}",
     node=MultistoryEpisodeFinderSensorConfig,
+)
+
+
+cs = ConfigStore.instance()
+cs.store(
+    package=f"habitat.task.lab_sensors.dummy_explorer",
+    group="habitat/task/lab_sensors",
+    name=f"dummy_explorer",
+    node=DummyExplorerSensorConfig,
 )
