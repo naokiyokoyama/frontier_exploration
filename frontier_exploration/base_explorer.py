@@ -9,7 +9,8 @@ from habitat import EmbodiedTask, Sensor, SensorTypes, registry
 from habitat.config.default_structured_configs import LabSensorConfig
 from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
 from habitat.tasks.nav.nav import TopDownMap
-from habitat.utils.visualizations import fog_of_war, maps
+from habitat.utils.visualizations import maps
+from frontier_exploration.utils.fog_of_war import reveal_fog_of_war
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig
 
@@ -134,7 +135,7 @@ class BaseExplorer(Sensor):
 
     def _update_fog_of_war_mask(self):
         orig = self.fog_of_war_mask.copy()
-        self.fog_of_war_mask = fog_of_war.reveal_fog_of_war(
+        self.fog_of_war_mask = reveal_fog_of_war(
             self.top_down_map,
             self.fog_of_war_mask,
             self._get_agent_pixel_coords(),
