@@ -1,16 +1,22 @@
+import os
 from dataclasses import dataclass
 from typing import Any
 
 import cv2
 import numpy as np
-from habitat import registry, EmbodiedTask
+from habitat import EmbodiedTask, registry
 from habitat.config import read_write
 from habitat.config.default_structured_configs import TopDownMapMeasurementConfig
-from habitat.tasks.nav.nav import TopDownMap, NavigationEpisode
+from habitat.tasks.nav.nav import NavigationEpisode, TopDownMap
+from habitat.utils.visualizations.utils import observations_to_image
 from hydra.core.config_store import ConfigStore
 
 from frontier_exploration.base_explorer import BaseExplorer
 from frontier_exploration.objnav_explorer import ObjNavExplorer
+
+DEBUG = os.environ.get("MAP_DEBUG", "False").lower() == "true"
+if DEBUG:
+    print(f"[{os.path.basename(__file__)}]: WARNING: MAP_DEBUG is True")
 
 
 @registry.register_measure
@@ -21,7 +27,7 @@ class FrontierExplorationMap(TopDownMap):
         config: "DictConfig",
         task: EmbodiedTask,
         *args: Any,
-        **kwargs: Any
+        **kwargs: Any,
     ):
         if BaseExplorer.cls_uuid in task._config.lab_sensors:
             self._explorer_uuid = BaseExplorer.cls_uuid
@@ -86,6 +92,19 @@ class FrontierExplorationMap(TopDownMap):
                 thickness,
             )
         self._metric["map"] = new_map
+
+        if DEBUG:
+            import time
+
+            if not os.path.exists("map_debug"):
+                os.mkdir("map_debug")
+            img = observations_to_image(
+                {}, {f"top_down_map.{k}": v for k, v in self._metric.items()}
+            )
+            cv2.imwrite(
+                f"map_debug/{int(time.time())}_full.png",
+                cv2.cvtColor(img, cv2.COLOR_RGB2BGR),
+            )
 
 
 @dataclass
