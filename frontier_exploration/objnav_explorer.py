@@ -71,28 +71,23 @@ class ObjNavExplorer(BaseExplorer):
         super()._pre_step(episode)
         if self._state == State.EXPLORE:
             return super().get_observation(task, episode, *args, **kwargs)
-        elif self._state == State.BEELINE:
-            # Check if min_dist is already less than the success distance
-            min_dist = self._get_min_dist()
+
+        # Transition to another state if necessary
+        min_dist = self._get_min_dist()
+        if self._state == State.BEELINE and min_dist < self._success_distance:
+            # Change to PIVOT state if already within success distance
+            closest_point = self.identify_closest_viewpoint()
+            closest_rot = closest_point.agent_state.rotation
+            self._target_yaw = 2 * np.arctan2(closest_rot[1], closest_rot[3])
+            self._state = State.PIVOT
+        elif self._state == State.PIVOT and min_dist > self._success_distance:
+            # Change to BEELINE state if we are now out of the success distance
+            self._state = State.BEELINE
+
+        # Execute the appropriate behavior for the current state
+        if self._state == State.BEELINE:
             self._beeline_target = self._episode._shortest_path_cache.points[-1]
-            if min_dist < self._success_distance:
-                view_points = [
-                    vp for goal in self._episode.goals for vp in goal.view_points
-                ]
-                min_dist, min_idx = float("inf"), None
-                for i, vp in enumerate(view_points):
-                    dist = np.linalg.norm(vp.agent_state.position - self.agent_position)
-                    if dist < min_dist:
-                        min_dist = dist
-                        min_idx = i
-                closest_rot = view_points[min_idx].agent_state.rotation
-                self._target_yaw = 2 * np.arctan2(closest_rot[1], closest_rot[3])
-
-                self._state = State.PIVOT
-                return self._pivot()
-
             return self._decide_action(self._beeline_target)
-
         elif self._state == State.PIVOT:
             return self._pivot()
         else:
@@ -100,7 +95,7 @@ class ObjNavExplorer(BaseExplorer):
 
     def _pivot(self):
         """Returns LEFT or RIGHT action to pivot the agent towards the target, or STOP
-        if the agent is already facing the target."""
+        if the agent is already facing the target as best it can."""
         agent_rot = self._sim.get_agent_state().rotation
         agent_yaw = 2 * np.arctan2(agent_rot.y, agent_rot.w)
         heading_err = -wrap_heading(self._target_yaw - agent_yaw)
@@ -112,17 +107,12 @@ class ObjNavExplorer(BaseExplorer):
 
     def identify_closest_viewpoint(self):
         """Returns the viewpoint closest to the agent"""
-        view_points = [
-            view_point
-            for goal in self._episode.goals
-            for view_point in goal.view_points
-        ]
+        view_points = [vp for goal in self._episode.goals for vp in goal.view_points]
         min_dist, min_idx = float("inf"), None
         for i, view_point in enumerate(view_points):
             dist = np.linalg.norm(view_point.agent_state.position - self.agent_position)
             if dist < min_dist:
-                min_dist = dist
-                min_idx = i
+                min_dist, min_idx = dist, i
         return view_points[min_idx]
 
     def _get_min_dist(self):
