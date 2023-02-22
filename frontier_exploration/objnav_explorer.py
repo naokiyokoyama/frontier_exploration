@@ -118,8 +118,11 @@ class ObjNavExplorer(BaseExplorer):
     def _get_min_dist(self):
         """Returns the minimum distance to the closest target"""
         dist_to_goal = self._task.measurements.measures[DistanceToGoal.cls_uuid]
-        dist_to_goal.update_metric(self._episode)
-        return dist_to_goal.get_metric()
+        dist_to_goal.update_metric(self._episode, task=self._task)
+        dist = dist_to_goal.get_metric()
+        if len(self._episode._shortest_path_cache.points) == 0:
+            return float("inf")
+        return dist
 
     def _update_fog_of_war_mask(self):
         updated = (
