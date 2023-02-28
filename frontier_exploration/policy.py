@@ -4,7 +4,7 @@ from habitat_baselines.common.baseline_registry import baseline_registry
 from habitat_baselines.rl.ppo import Policy
 
 from frontier_exploration.base_explorer import BaseExplorer
-from frontier_exploration.objnav_explorer import ObjNavExplorer
+from frontier_exploration.objnav_explorer import ObjNavExplorer, GreedyObjNavExplorer
 
 
 @baseline_registry.register_policy
@@ -39,9 +39,11 @@ class FrontierExplorationPolicy(Policy):
             sensor_uuid = BaseExplorer.cls_uuid
         elif ObjNavExplorer.cls_uuid in observations:
             sensor_uuid = ObjNavExplorer.cls_uuid
+        elif GreedyObjNavExplorer.cls_uuid in observations:
+            sensor_uuid = GreedyObjNavExplorer.cls_uuid
         else:
             raise RuntimeError(
-                "FrontierExplorationPolicy needs BaseExplorer or ObjNavExplorer sensor"
+                "FrontierExplorationPolicy needs an exploration sensor"
             )
         action = observations[sensor_uuid].type(torch.long)
         return None, action, None, rnn_hidden_states

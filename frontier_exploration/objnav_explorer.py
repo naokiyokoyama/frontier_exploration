@@ -51,11 +51,13 @@ class ObjNavExplorer(BaseExplorer):
         self._state = State.EXPLORE
         self._beeline_target = None
         self._target_yaw = None
-        self._episode_view_points = [
-            view_point.agent_state.position
-            for goal in episode.goals
-            for view_point in goal.view_points
-        ]
+        self._episode_view_points = np.array(
+            [
+                view_point.agent_state.position
+                for goal in episode.goals
+                for view_point in goal.view_points
+            ]
+        )
         self._task.measurements.measures[DistanceToGoal.cls_uuid].reset_metric(episode)
 
     @property
@@ -141,6 +143,25 @@ class ObjNavExplorer(BaseExplorer):
         return updated
 
 
+@registry.register_sensor
+class GreedyObjNavExplorer(ObjNavExplorer):
+    cls_uuid: str = "greedy_objnav_explorer"
+
+    def _get_closest_waypoint(self):
+        if len(self.frontier_waypoints) == 0:
+            return None
+        # Identify the closest target object
+        idx, _ = self._astar_search(self._episode_view_points)
+        if idx is None:
+            return None
+        closest_point = self._episode_view_points[idx]
+        # Identify the frontier waypoint closest to this object
+        sim_waypoints = self._pixel_to_map_coors(self.frontier_waypoints)
+        idx, _ = self._astar_search(sim_waypoints, start_position=closest_point)
+
+        return self.frontier_waypoints[idx]
+
+
 @dataclass
 class ObjNavExplorerSensorConfig(BaseExplorerSensorConfig):
     type: str = ObjNavExplorer.__name__
@@ -149,10 +170,21 @@ class ObjNavExplorerSensorConfig(BaseExplorerSensorConfig):
     success_distance: float = 0.1  # meters
 
 
+@dataclass
+class GreedyObjNavExplorerSensorConfig(ObjNavExplorerSensorConfig):
+    type: str = GreedyObjNavExplorer.__name__
+
+
 cs = ConfigStore.instance()
 cs.store(
     package=f"habitat.task.lab_sensors.{ObjNavExplorer.cls_uuid}",
     group="habitat/task/lab_sensors",
     name=f"{ObjNavExplorer.cls_uuid}",
     node=ObjNavExplorerSensorConfig,
+)
+cs.store(
+    package=f"habitat.task.lab_sensors.{GreedyObjNavExplorer.cls_uuid}",
+    group="habitat/task/lab_sensors",
+    name=f"{GreedyObjNavExplorer.cls_uuid}",
+    node=GreedyObjNavExplorerSensorConfig,
 )

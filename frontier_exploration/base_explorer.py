@@ -174,8 +174,20 @@ class BaseExplorer(Sensor):
         if len(self.frontier_waypoints) == 0:
             return None
         sim_waypoints = self._pixel_to_map_coors(self.frontier_waypoints)
+        idx, _ = self._astar_search(sim_waypoints)
+        if idx is None:
+            return None
 
-        if self._minimize_time:
+        return self.frontier_waypoints[idx]
+
+    def _astar_search(self, sim_waypoints, start_position=None):
+        if start_position is None:
+            minimize_time = self._minimize_time
+            start_position = self.agent_position
+        else:
+            minimize_time = False
+
+        if minimize_time:
             heuristic_fn = lambda x: completion_time_heuristic(
                 x,
                 self.agent_position,
@@ -192,14 +204,10 @@ class BaseExplorer(Sensor):
                 self._sim,
             )
         else:
-            heuristic_fn = lambda x: euclidean_heuristic(x, self.agent_position)
-            cost_fn = lambda x: path_dist_cost(x, self.agent_position, self._sim)
+            heuristic_fn = lambda x: euclidean_heuristic(x, start_position)
+            cost_fn = lambda x: path_dist_cost(x, start_position, self._sim)
 
-        idx, _ = a_star_search(sim_waypoints, heuristic_fn, cost_fn)
-        if idx is None:
-            return None
-
-        return self.frontier_waypoints[idx]
+        return a_star_search(sim_waypoints, heuristic_fn, cost_fn)
 
     def _decide_action(self, target: np.ndarray) -> np.ndarray:
         if target is None:

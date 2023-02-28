@@ -12,7 +12,7 @@ from habitat.utils.visualizations.utils import observations_to_image
 from hydra.core.config_store import ConfigStore
 
 from frontier_exploration.base_explorer import BaseExplorer
-from frontier_exploration.objnav_explorer import ObjNavExplorer
+from frontier_exploration.objnav_explorer import ObjNavExplorer, GreedyObjNavExplorer
 
 DEBUG = os.environ.get("MAP_DEBUG", "False").lower() == "true"
 if DEBUG:
@@ -29,13 +29,17 @@ class FrontierExplorationMap(TopDownMap):
         *args: Any,
         **kwargs: Any,
     ):
-        if BaseExplorer.cls_uuid in task._config.lab_sensors:
-            self._explorer_uuid = BaseExplorer.cls_uuid
-        elif ObjNavExplorer.cls_uuid in task._config.lab_sensors:
-            self._explorer_uuid = ObjNavExplorer.cls_uuid
-        else:
+        self._explorer_uuid = None
+        for i in [BaseExplorer, ObjNavExplorer, GreedyObjNavExplorer]:
+            if i.cls_uuid in task._config.lab_sensors:
+                assert self._explorer_uuid is None, (
+                    "FrontierExplorationMap only supports 1 explorer sensor at a time!"
+                )
+                self._explorer_uuid = i.cls_uuid
+
+        if self._explorer_uuid is None:
             raise RuntimeError(
-                "FrontierExplorationMap needs a BaseExplorer or ObjNavExplorer sensor!"
+                "FrontierExplorationMap needs an exploration sensor!"
             )
         explorer_config = task._config.lab_sensors[self._explorer_uuid]
         with read_write(config):
