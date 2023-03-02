@@ -62,6 +62,9 @@ class BaseExplorer(Sensor):
         self.top_down_map = None
         self.fog_of_war_mask = None
         self.frontier_waypoints = np.array([])
+        # Inflection is used by action inflection sensor for IL
+        self.inflection = False
+        self._prev_action = None
 
         self._area_thresh_in_pixels = None
         self._visibility_dist_in_pixels = None
@@ -89,6 +92,8 @@ class BaseExplorer(Sensor):
         self._next_waypoint = None
         self._default_dir = None
         self._first_frontier = False
+        self.inflection = False
+        self._prev_action = None
 
     def _get_uuid(self, *args: Any, **kwargs: Any) -> str:
         return self.cls_uuid
@@ -125,6 +130,12 @@ class BaseExplorer(Sensor):
         self._update_frontiers()
         self.closest_frontier_waypoint = self._get_closest_waypoint()
         action = self._decide_action(self.closest_frontier_waypoint)
+
+        # Inflection is used by action inflection sensor for IL
+        if self._prev_action is not None:
+            self.inflection = self._prev_action != action
+        self._prev_action = action
+
         return action
 
     def _pre_step(self, episode):
