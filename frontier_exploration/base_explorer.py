@@ -280,7 +280,7 @@ class BaseExplorerSensorConfig(LabSensorConfig):
     forward_step_size: float = 0.25  # meters
     fov: int = 90
     lin_vel: float = 0.25  # meters per second
-    map_resolution: int = 1024
+    map_resolution: int = 128
     minimize_time: bool = True
     success_distance: float = 0.18  # meters
     turn_angle: float = 10.0  # degrees
