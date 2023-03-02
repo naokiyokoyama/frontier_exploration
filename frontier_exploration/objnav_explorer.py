@@ -44,6 +44,7 @@ class ObjNavExplorer(BaseExplorer):
         self._beeline_target = None
         self._target_yaw = None
         self._episode_view_points: Optional[List[Tuple[float, float, float]]] = None
+        self._goal_dist_measure = task.measurements.measures[DistanceToGoal.cls_uuid]
 
     def _reset(self, episode):
         super()._reset(episode)
@@ -58,7 +59,7 @@ class ObjNavExplorer(BaseExplorer):
                 for view_point in goal.view_points
             ]
         )
-        self._task.measurements.measures[DistanceToGoal.cls_uuid].reset_metric(episode)
+        self._goal_dist_measure.reset_metric(episode)
 
     @property
     def beeline_target_pixels(self):
@@ -119,10 +120,12 @@ class ObjNavExplorer(BaseExplorer):
 
     def _get_min_dist(self):
         """Returns the minimum distance to the closest target"""
-        dist_to_goal = self._task.measurements.measures[DistanceToGoal.cls_uuid]
-        dist_to_goal.update_metric(self._episode, task=self._task)
-        dist = dist_to_goal.get_metric()
-        if len(self._episode._shortest_path_cache.points) == 0:
+        self._goal_dist_measure.update_metric(self._episode, task=self._task)
+        dist = self._goal_dist_measure.get_metric()
+        if (
+            self._episode._shortest_path_cache.points is None
+            or len(self._episode._shortest_path_cache.points) == 0
+        ):
             return float("inf")
         return dist
 
@@ -151,10 +154,17 @@ class GreedyObjNavExplorer(ObjNavExplorer):
         if len(self.frontier_waypoints) == 0:
             return None
         # Identify the closest target object
-        idx, _ = self._astar_search(self._episode_view_points)
-        if idx is None:
-            return None
-        closest_point = self._episode_view_points[idx]
+        self._goal_dist_measure.update_metric(self._episode, task=self._task)
+        pts_cache = self._episode._shortest_path_cache
+        if hasattr(pts_cache, "closest_end_point_index"):
+            if pts_cache.closest_end_point_index == -1:
+                return None
+            closest_point = pts_cache.requested_ends[pts_cache.closest_end_point_index]
+        else:
+            idx, _ = self._astar_search(self._episode_view_points)
+            if idx is None:
+                return None
+            closest_point = self._episode_view_points[idx]
         # Identify the frontier waypoint closest to this object
         sim_waypoints = self._pixel_to_map_coors(self.frontier_waypoints)
         idx, _ = self._astar_search(sim_waypoints, start_position=closest_point)
