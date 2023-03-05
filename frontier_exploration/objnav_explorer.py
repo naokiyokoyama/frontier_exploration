@@ -123,7 +123,7 @@ class ObjNavExplorer(BaseExplorer):
         self._goal_dist_measure.update_metric(self._episode, task=self._task)
         dist = self._goal_dist_measure.get_metric()
         if (
-            self._episode._shortest_path_cache.points is None
+            self._episode._shortest_path_cache is None
             or len(self._episode._shortest_path_cache.points) == 0
         ):
             return float("inf")
