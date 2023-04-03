@@ -92,7 +92,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "input_dataset",
         type=str,
-        help="Path to the full episodes directory",
+        help="Path to the full episodes directory (containing 'content/*json.gz')",
     )
     parser.add_argument(
         "output_dataset",
