@@ -11,7 +11,7 @@ try:
 except ModuleNotFoundError as e:
     # If the error was due to the habitat package not being installed, then pass, but
     # print a warning. Do not pass if it was due to another package being missing.
-    if e.name != "habitat":
+    if e.name not in ["habitat", "habitat_sim"]:
         raise e
     else:
         print(
