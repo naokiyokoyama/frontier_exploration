@@ -1,3 +1,4 @@
+import os
 import random
 from dataclasses import dataclass
 from typing import Any
@@ -10,16 +11,17 @@ from habitat.config.default_structured_configs import LabSensorConfig
 from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
 from habitat.tasks.nav.nav import TopDownMap
 from habitat.utils.visualizations import maps
-from frontier_exploration.utils.fog_of_war import reveal_fog_of_war
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig
 
 from frontier_exploration.frontier_detection import detect_frontier_waypoints
+from frontier_exploration.utils.fog_of_war import reveal_fog_of_war
 from frontier_exploration.utils.path_utils import (
     a_star_search,
     completion_time_heuristic,
     euclidean_heuristic,
     heading_error,
+    is_in_2d_array,
     path_dist_cost,
     path_time_cost,
 )
@@ -57,7 +59,7 @@ class BaseExplorer(Sensor):
         self._turn_angle = np.deg2rad(config.turn_angle)
         self._visibility_dist = config.visibility_dist
 
-        # These public attributes are used by the FrontierExplorationMap measurement
+        # Public attributes are used by the FrontierExplorationMap measurement
         self.closest_frontier_waypoint = None
         self.top_down_map = None
         self.fog_of_war_mask = None
@@ -73,7 +75,7 @@ class BaseExplorer(Sensor):
         self._curr_ep_id = None
         self._next_waypoint = None
         self._default_dir = None
-        self._first_frontier = False  # whether any frontiers have been found at all yet
+        self._first_frontier = False  # whether frontiers have been found yet
 
     def _reset(self, *args, **kwargs):
         self.top_down_map = maps.get_topdown_map_from_sim(
@@ -167,7 +169,7 @@ class BaseExplorer(Sensor):
                 # xy=self._get_agent_pixel_coords(),
             )
             if len(self.frontier_waypoints) > 0:
-                # frontiers are in (y, x) format, so we need to do some swapping
+                # frontiers are in (y, x) format, need to do some swapping
                 self.frontier_waypoints = self.frontier_waypoints[:, ::-1]
 
     def _get_next_waypoint(self, goal: np.ndarray):
@@ -177,7 +179,7 @@ class BaseExplorer(Sensor):
             shortest_path.requested_end = self._pixel_to_map_coors(goal)
         else:
             shortest_path.requested_end = goal
-        assert self._sim.pathfinder.find_path(shortest_path), "Could not find path!"
+        assert self._sim.pathfinder.find_path(shortest_path), "No path found!"
         next_waypoint = shortest_path.points[1]
         return next_waypoint
 
@@ -209,7 +211,7 @@ class BaseExplorer(Sensor):
             cost_fn = lambda x: path_time_cost(
                 x,
                 self.agent_position,
-                self._agent_heading,
+                self.agent_heading,
                 self._lin_vel,
                 self._ang_vel,
                 self._sim,
@@ -227,8 +229,10 @@ class BaseExplorer(Sensor):
                 if self._default_dir is None:
                     # Randomly select between LEFT or RIGHT
                     self._default_dir = bool(random.getrandbits(1))
-                act = ActionIDs.TURN_LEFT if self._default_dir else ActionIDs.TURN_RIGHT
-                return act
+                if self._default_dir:
+                    return ActionIDs.TURN_LEFT
+                else:
+                    return ActionIDs.TURN_RIGHT
             # If frontiers have been found but now there are no more, stop
             return ActionIDs.STOP
         self._first_frontier = True
@@ -250,7 +254,9 @@ class BaseExplorer(Sensor):
     def _convert_meters_to_pixel(self, meters: float) -> int:
         return int(
             meters
-            / maps.calculate_meters_per_pixel(self._map_resolution, sim=self._sim)
+            / maps.calculate_meters_per_pixel(
+                self._map_resolution, sim=self._sim
+            )
         )
 
     def _pixel_to_map_coors(self, pixel: np.ndarray) -> np.ndarray:
@@ -259,7 +265,10 @@ class BaseExplorer(Sensor):
         else:
             x, y = pixel[:, 0], pixel[:, 1]
         realworld_x, realworld_y = maps.from_grid(
-            x, y, (self.top_down_map.shape[0], self.top_down_map.shape[1]), self._sim
+            x,
+            y,
+            (self.top_down_map.shape[0], self.top_down_map.shape[1]),
+            self._sim,
         )
         if pixel.ndim == 1:
             return self._sim.pathfinder.snap_point(
@@ -289,13 +298,13 @@ class BaseExplorerSensorConfig(LabSensorConfig):
     ang_vel: float = 10.0  # degrees per second
     area_thresh: float = 3.0  # square meters
     forward_step_size: float = 0.25  # meters
-    fov: int = 90
+    fov: int = 79
     lin_vel: float = 0.25  # meters per second
-    map_resolution: int = 128
+    map_resolution: int = 256
     minimize_time: bool = True
     success_distance: float = 0.18  # meters
     turn_angle: float = 10.0  # degrees
-    visibility_dist: float = 5.0  # in meters
+    visibility_dist: float = 4.5  # in meters
 
 
 cs = ConfigStore.instance()

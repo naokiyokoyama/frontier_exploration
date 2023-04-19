@@ -118,3 +118,10 @@ def a_star_search(candidates, heuristic_fn, cost_fn):
             min_cost = cost
             best_idx = idx
     return best_idx, min_cost
+
+
+def is_in_2d_array(arr_1d, arr_2d):
+    for row in arr_2d:
+        if np.array_equal(arr_1d, row):
+            return True
+    return False

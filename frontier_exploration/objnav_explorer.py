@@ -65,7 +65,7 @@ class ObjNavExplorer(BaseExplorer):
                 for view_point in goal.view_points
             ]
         )
-        self._goal_dist_measure.reset_metric(episode)
+        self._goal_dist_measure.reset_metric(episode, task=self._task)
         self._step_count = 0
 
     @property
@@ -149,9 +149,13 @@ class ObjNavExplorer(BaseExplorer):
 
     def identify_closest_viewpoint(self):
         """Returns the viewpoint closest to the agent"""
-        view_points = [
-            vp for goal in self._episode.goals for vp in goal.view_points
-        ]
+        if len(self._episode.goals) > 0:
+            goals = self._episode.goals
+        else:
+            goals = self._task._dataset.goals_by_category[  # type: ignore
+                self._episode.goals_key
+            ]
+        view_points = [vp for goal in goals for vp in goal.view_points]
         min_dist, min_idx = float("inf"), None
         for i, view_point in enumerate(view_points):
             dist = np.linalg.norm(
@@ -227,7 +231,7 @@ class GreedyObjNavExplorer(ObjNavExplorer):
 class ObjNavExplorerSensorConfig(BaseExplorerSensorConfig):
     type: str = ObjNavExplorer.__name__
     turn_angle: float = 30.0  # degrees
-    beeline_dist_thresh: float = 3  # meters
+    beeline_dist_thresh: float = 8  # meters
     success_distance: float = 0.1  # meters
 
 
