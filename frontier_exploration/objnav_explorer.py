@@ -1,11 +1,13 @@
 import random
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 from habitat import EmbodiedTask, registry
 from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
 from habitat.tasks.nav.nav import DistanceToGoal
+from habitat.tasks.nav.object_nav_task import ObjectGoal, ObjectViewLocation
+from habitat_sim import AgentState
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig
 
@@ -44,9 +46,6 @@ class ObjNavExplorer(BaseExplorer):
         self._state = State.EXPLORE
         self._beeline_target = None
         self._target_yaw = None
-        self._episode_view_points: Optional[
-            List[Tuple[float, float, float]]
-        ] = None
         self._goal_dist_measure = task.measurements.measures[
             DistanceToGoal.cls_uuid
         ]
@@ -58,13 +57,6 @@ class ObjNavExplorer(BaseExplorer):
         self._state = State.EXPLORE
         self._beeline_target = None
         self._target_yaw = None
-        self._episode_view_points = np.array(
-            [
-                view_point.agent_state.position
-                for goal in episode.goals
-                for view_point in goal.view_points
-            ]
-        )
         self._goal_dist_measure.reset_metric(episode, task=self._task)
         self._step_count = 0
 
@@ -155,7 +147,11 @@ class ObjNavExplorer(BaseExplorer):
             goals = self._task._dataset.goals_by_category[  # type: ignore
                 self._episode.goals_key
             ]
-        view_points = [vp for goal in goals for vp in goal.view_points]
+        if isinstance(goals[0], ObjectGoal):
+            view_points = [vp for goal in goals for vp in goal.view_points]
+        else:
+            agent_state = AgentState(goals[0].position, goals[0].rotation, {})
+            view_points = [ObjectViewLocation(agent_state, None)]
         min_dist, min_idx = float("inf"), None
         for i, view_point in enumerate(view_points):
             dist = np.linalg.norm(
