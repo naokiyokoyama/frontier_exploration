@@ -75,7 +75,7 @@ class ObjNavExplorer(BaseExplorer):
             action = super().get_observation(task, episode, *args, **kwargs)
             if np.array_equal(action, ActionIDs.STOP):
                 # This is undefined behavior. The explorer shouldn't run out of
-                # frontiers, but sometimes it does if the episode is set up incorrectly.
+                # frontiers, but episode is set up incorrectly.
                 task.is_stop_called = True
                 # Randomly re-assign the action to forward or turn left/right
                 action = random.choice(
@@ -103,7 +103,7 @@ class ObjNavExplorer(BaseExplorer):
                 self._state == State.PIVOT
                 and min_dist > self._success_distance
             ):
-                # Change to BEELINE state if we are now out of the success distance
+                # Change to BEELINE state if now out of the success distance
                 self._state = State.BEELINE
 
             # Execute the appropriate behavior for the current state
@@ -117,8 +117,8 @@ class ObjNavExplorer(BaseExplorer):
             else:
                 raise ValueError("Invalid state")
 
-            # Inflection is used by action inflection sensor for IL. This is already
-            # done by BaseExplorer when in EXPLORE state.
+            # Inflection is used by action inflection sensor for IL. This is
+            # already done by BaseExplorer when in EXPLORE state.
             if self._prev_action is not None:
                 self.inflection = self._prev_action != action
             self._prev_action = action
@@ -128,8 +128,8 @@ class ObjNavExplorer(BaseExplorer):
         return action
 
     def _pivot(self):
-        """Returns LEFT or RIGHT action to pivot the agent towards the target, or STOP
-        if the agent is already facing the target as best it can."""
+        """Returns LEFT or RIGHT action to pivot the agent towards the target,
+        or STOP if the agent is already facing the target as best it can."""
         agent_rot = self._sim.get_agent_state().rotation
         agent_yaw = 2 * np.arctan2(agent_rot.y, agent_rot.w)
         heading_err = -wrap_heading(self._target_yaw - agent_yaw)
