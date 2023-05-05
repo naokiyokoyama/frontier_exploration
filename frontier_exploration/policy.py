@@ -41,6 +41,8 @@ class FrontierExplorationPolicy(Policy):
             sensor_uuid = ObjNavExplorer.cls_uuid
         elif GreedyObjNavExplorer.cls_uuid in observations:
             sensor_uuid = GreedyObjNavExplorer.cls_uuid
+        elif "teacher_label" in observations:
+            sensor_uuid = "teacher_label"
         else:
             raise RuntimeError(
                 "FrontierExplorationPolicy needs an exploration sensor"

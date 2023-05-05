@@ -175,10 +175,9 @@ class BaseExplorer(Sensor):
     def _get_next_waypoint(self, goal: np.ndarray):
         shortest_path = habitat_sim.nav.ShortestPath()
         shortest_path.requested_start = self.agent_position
-        if len(goal) == 2:
-            shortest_path.requested_end = self._pixel_to_map_coors(goal)
-        else:
-            shortest_path.requested_end = goal
+        shortest_path.requested_end = (
+            self._pixel_to_map_coors(goal) if len(goal) == 2 else goal
+        )
         assert self._sim.pathfinder.find_path(shortest_path), "No path found!"
         next_waypoint = shortest_path.points[1]
         return next_waypoint
