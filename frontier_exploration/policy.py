@@ -3,8 +3,17 @@ from gym import spaces
 from habitat_baselines.common.baseline_registry import baseline_registry
 from habitat_baselines.rl.ppo import Policy
 
+try:
+    from habitat_baselines.rl.ppo.policy import PolicyActionData
+
+    POLICY_ACTION_DATA = True
+except:
+    POLICY_ACTION_DATA = False
+
+
 from frontier_exploration.base_explorer import BaseExplorer
-from frontier_exploration.objnav_explorer import GreedyObjNavExplorer, ObjNavExplorer
+from frontier_exploration.objnav_explorer import (GreedyObjNavExplorer,
+                                                  ObjNavExplorer)
 
 
 @baseline_registry.register_policy
@@ -48,6 +57,8 @@ class FrontierExplorationPolicy(Policy):
                 "FrontierExplorationPolicy needs an exploration sensor"
             )
         action = observations[sensor_uuid].type(torch.long)
+        if POLICY_ACTION_DATA:
+            return PolicyActionData(actions=action, rnn_hidden_states=rnn_hidden_states)
         return None, action, None, rnn_hidden_states
 
     # used in ppo_trainer.py eval:
