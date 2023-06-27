@@ -4,7 +4,7 @@ from habitat_baselines.common.baseline_registry import baseline_registry
 from habitat_baselines.rl.ppo import Policy
 
 from frontier_exploration.base_explorer import BaseExplorer
-from frontier_exploration.objnav_explorer import ObjNavExplorer, GreedyObjNavExplorer
+from frontier_exploration.objnav_explorer import GreedyObjNavExplorer, ObjNavExplorer
 
 
 @baseline_registry.register_policy
@@ -57,3 +57,6 @@ class FrontierExplorationPolicy(Policy):
 
     def eval(self):
         return
+
+    def parameters(self):
+        yield torch.zeros(1)

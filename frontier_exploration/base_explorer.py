@@ -115,7 +115,14 @@ class BaseExplorer(Sensor):
     @property
     def agent_heading(self):
         if self._agent_heading is None:
-            self._agent_heading = TopDownMap.get_polar_angle(self)
+            try:
+                # hablab v0.2.3
+                self._agent_heading = TopDownMap.get_polar_angle(self)
+            except AttributeError:
+                # hablab v0.2.4
+                self._agent_heading = TopDownMap.get_polar_angle(
+                    self._sim.get_agent_state()
+                )
         return self._agent_heading
 
     @property
