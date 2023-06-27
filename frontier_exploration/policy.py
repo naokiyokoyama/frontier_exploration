@@ -12,8 +12,7 @@ except:
 
 
 from frontier_exploration.base_explorer import BaseExplorer
-from frontier_exploration.objnav_explorer import (GreedyObjNavExplorer,
-                                                  ObjNavExplorer)
+from frontier_exploration.objnav_explorer import GreedyObjNavExplorer, ObjNavExplorer
 
 
 @baseline_registry.register_policy
@@ -53,9 +52,7 @@ class FrontierExplorationPolicy(Policy):
         elif "teacher_label" in observations:
             sensor_uuid = "teacher_label"
         else:
-            raise RuntimeError(
-                "FrontierExplorationPolicy needs an exploration sensor"
-            )
+            raise RuntimeError("FrontierExplorationPolicy needs an exploration sensor")
         action = observations[sensor_uuid].type(torch.long)
         if POLICY_ACTION_DATA:
             return PolicyActionData(actions=action, rnn_hidden_states=rnn_hidden_states)
