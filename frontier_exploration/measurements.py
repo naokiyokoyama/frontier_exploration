@@ -57,7 +57,7 @@ class FrontierExplorationMap(TopDownMap):
     def get_original_map(self):
         return self._explorer_sensor.top_down_map.copy()
 
-    def update_fog_of_war_mask(self, agent_position):
+    def update_fog_of_war_mask(self, *args, **kwargs):
         self._fog_of_war_mask = self._explorer_sensor.fog_of_war_mask.copy()
 
     def update_metric(self, episode, action, *args: Any, **kwargs: Any):
