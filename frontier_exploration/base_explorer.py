@@ -1,4 +1,3 @@
-import os
 import random
 from dataclasses import dataclass
 from typing import Any
@@ -21,7 +20,6 @@ from frontier_exploration.utils.path_utils import (
     completion_time_heuristic,
     euclidean_heuristic,
     heading_error,
-    is_in_2d_array,
     path_dist_cost,
     path_time_cost,
 )
@@ -85,7 +83,7 @@ class BaseExplorer(Sensor):
         )
         self.fog_of_war_mask = np.zeros_like(self.top_down_map)
         self._area_thresh_in_pixels = self._convert_meters_to_pixel(
-            self._area_thresh ** 2
+            self._area_thresh**2
         )
         self._visibility_dist_in_pixels = self._convert_meters_to_pixel(
             self._visibility_dist
@@ -180,13 +178,10 @@ class BaseExplorer(Sensor):
                 self.frontier_waypoints = self.frontier_waypoints[:, ::-1]
 
     def _get_next_waypoint(self, goal: np.ndarray):
-        shortest_path = habitat_sim.nav.ShortestPath()
-        shortest_path.requested_start = self.agent_position
-        shortest_path.requested_end = (
-            self._pixel_to_map_coors(goal) if len(goal) == 2 else goal
+        goal_3d = self._pixel_to_map_coors(goal) if len(goal) == 2 else goal
+        next_waypoint = get_next_waypoint(
+            self.agent_position, goal_3d, self._sim.pathfinder
         )
-        assert self._sim.pathfinder.find_path(shortest_path), "No path found!"
-        next_waypoint = shortest_path.points[1]
         return next_waypoint
 
     def _get_closest_waypoint(self):
@@ -207,24 +202,33 @@ class BaseExplorer(Sensor):
             minimize_time = False
 
         if minimize_time:
-            heuristic_fn = lambda x: completion_time_heuristic(
-                x,
-                self.agent_position,
-                self.agent_heading,
-                self._lin_vel,
-                self._ang_vel,
-            )
-            cost_fn = lambda x: path_time_cost(
-                x,
-                self.agent_position,
-                self.agent_heading,
-                self._lin_vel,
-                self._ang_vel,
-                self._sim,
-            )
+
+            def heuristic_fn(x):
+                return completion_time_heuristic(
+                    x,
+                    self.agent_position,
+                    self.agent_heading,
+                    self._lin_vel,
+                    self._ang_vel,
+                )
+
+            def cost_fn(x):
+                return path_time_cost(
+                    x,
+                    self.agent_position,
+                    self.agent_heading,
+                    self._lin_vel,
+                    self._ang_vel,
+                    self._sim,
+                )
+
         else:
-            heuristic_fn = lambda x: euclidean_heuristic(x, start_position)
-            cost_fn = lambda x: path_dist_cost(x, start_position, self._sim)
+
+            def heuristic_fn(x):
+                return euclidean_heuristic(x, start_position)
+
+            def cost_fn(x):
+                return path_dist_cost(x, start_position, self._sim)
 
         return a_star_search(sim_waypoints, heuristic_fn, cost_fn)
 
@@ -243,16 +247,19 @@ class BaseExplorer(Sensor):
             return ActionIDs.STOP
         self._first_frontier = True
 
+        # Get next waypoint along the shortest path towards the selected frontier
+        # (target)
         self._next_waypoint = self._get_next_waypoint(target)
-        heading_err = self._heading_error(self._next_waypoint)
-        if heading_err > self._turn_angle:
-            return ActionIDs.TURN_RIGHT
-        elif heading_err < -self._turn_angle:
-            return ActionIDs.TURN_LEFT
-        return ActionIDs.MOVE_FORWARD
 
-    def _heading_error(self, position: np.ndarray) -> float:
-        return heading_error(self.agent_position, position, self.agent_heading)
+        # Determine which action is most suitable for reaching the next waypoint
+        action = determine_pointturn_action(
+            self.agent_position,
+            self._next_waypoint,
+            self.agent_heading,
+            self._turn_angle,
+        )
+
+        return action
 
     def _get_agent_pixel_coords(self) -> np.ndarray:
         return self._map_coors_to_pixel(self.agent_position)
@@ -260,9 +267,7 @@ class BaseExplorer(Sensor):
     def _convert_meters_to_pixel(self, meters: float) -> int:
         return int(
             meters
-            / maps.calculate_meters_per_pixel(
-                self._map_resolution, sim=self._sim
-            )
+            / maps.calculate_meters_per_pixel(self._map_resolution, sim=self._sim)
         )
 
     def _pixel_to_map_coors(self, pixel: np.ndarray) -> np.ndarray:
@@ -294,6 +299,31 @@ class BaseExplorer(Sensor):
             sim=self._sim,
         )
         return np.array([a_x, a_y])
+
+
+def get_next_waypoint(
+    start: np.ndarray, goal: np.ndarray, pathfinder: "PathFinder"
+) -> np.ndarray:
+    shortest_path = habitat_sim.nav.ShortestPath()
+    shortest_path.requested_start = start
+    shortest_path.requested_end = goal
+    assert pathfinder.find_path(shortest_path), "No path found!"
+    next_waypoint = shortest_path.points[1]
+    return next_waypoint
+
+
+def determine_pointturn_action(
+    start: np.ndarray,
+    next_waypoint: np.ndarray,
+    agent_heading: np.ndarray,
+    turn_angle: float,
+) -> np.ndarray:
+    heading_err = heading_error(start, next_waypoint, agent_heading)
+    if heading_err > turn_angle:
+        return ActionIDs.TURN_RIGHT
+    elif heading_err < -turn_angle:
+        return ActionIDs.TURN_LEFT
+    return ActionIDs.MOVE_FORWARD
 
 
 @dataclass
