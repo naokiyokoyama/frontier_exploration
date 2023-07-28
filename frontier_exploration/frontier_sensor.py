@@ -15,6 +15,9 @@ from omegaconf import DictConfig
 
 from frontier_exploration.base_explorer import BaseExplorer
 
+# from frontier_exploration.utils.path_utils import path_dist_cost
+from frontier_exploration.utils.path_utils import path_time_cost
+
 
 @registry.register_sensor
 class FrontierSensor(Sensor):
@@ -57,82 +60,55 @@ class FrontierSensor(Sensor):
             return np.zeros((1, 3), dtype=np.float32)
 
         global_frontiers = explorer._pixel_to_map_coors(explorer.frontier_waypoints)
-        global_frontiers = convert_habitat_to_xyz(global_frontiers)
 
-        start_pos = np.array([episode.start_position])
-        episode_origin = convert_habitat_to_xyz(start_pos)[0]
+        # Sort the frontiers by completion time cost
+        completion_times = []
 
-        episodic_frontiers = global_to_local(
-            global_frontiers, episode_origin, self.episodic_yaw
-        )
-        episodic_frontiers = flip_xy(episodic_frontiers)
+        for frontier in global_frontiers:
+            completion_times.append(
+                path_time_cost(
+                    frontier,
+                    explorer.agent_position,
+                    explorer.agent_heading,
+                    explorer._lin_vel,
+                    explorer._ang_vel,
+                    explorer._sim,
+                )
+            )
+            # completion_times.append(
+            #     path_dist_cost(frontier, explorer.agent_position, explorer._sim)
+            # )
+        global_frontiers = global_frontiers[np.argsort(completion_times)]
+
+        episode_origin = np.array(episode.start_position)
+
+        episodic_frontiers = []
+        for g_frontier in global_frontiers:
+            pt = global_to_episodic_xy(
+                episode_origin, self.episodic_yaw, g_frontier
+            )
+            episodic_frontiers.append(pt)
+        episodic_frontiers = np.array(episodic_frontiers)
 
         return episodic_frontiers
 
-
-def global_to_local(
-    global_coors: np.ndarray, local_origin: np.ndarray, local_yaw: float
-) -> np.ndarray:
-    """Converts global coordinates to local coordinates, given the 3D coordinates of the
-    local origin and the yaw of the local frame. Assumes that local frame has 0 pitch
-    and roll.
-
-    Args:
-        global_coors (np.ndarray): Array of global coordinates to convert
-        local_origin (np.ndarray): 3D coordinates of the local origin
-        local_yaw (float): Yaw of the local frame
-
-    Returns:
-        np.ndarray: Array of local coordinates
+def global_to_episodic_xy(episodic_start, episodic_yaw, pt):
     """
-    # Shift the global coordinates with respect to the local origin
-    # Add a new axis to the local_origin to enable broadcasting over the global_coors
-    coors = global_coors - local_origin[np.newaxis, ...]
+    All args are in Habitat format.
+    """
+    # Habitat to xy
+    pt = np.array([pt[2], pt[0]])
+    episodic_start = np.array([episodic_start[2], episodic_start[0]])
 
-    # Create the rotation matrix
-    # Yaw is rotation around the Z axis. As we are converting from global to local
-    # (inverse transform), we take negative of the yaw angle.
     rotation_matrix = np.array(
         [
-            [np.cos(-local_yaw), -np.sin(-local_yaw), 0],
-            [np.sin(-local_yaw), np.cos(-local_yaw), 0],
-            [0, 0, 1],
+            [np.cos(-episodic_yaw), -np.sin(-episodic_yaw)],
+            [np.sin(-episodic_yaw), np.cos(-episodic_yaw)],
         ]
     )
+    episodic_xy = -np.matmul(rotation_matrix, pt - episodic_start)
 
-    # Apply rotation to every coordinate shifted to the local origin
-    # Transpose both matrices to align the dimensions correctly for matmul operation
-    local_coors = np.matmul(coors, rotation_matrix.T)
-
-    return local_coors
-
-
-def convert_habitat_to_xyz(coors: np.ndarray) -> np.ndarray:
-    return np.column_stack((-coors[:, 2], coors[:, 0], coors[:, 1])).astype(np.float32)
-
-
-def flip_xy(coors: np.ndarray) -> np.ndarray:
-    pts = np.column_stack((coors[:, 0], -coors[:, 1], coors[:, 2])).astype(np.float32)
-    pts = np.column_stack((pts[:, 1], pts[:, 0], pts[:, 2]))
-    pts = rotate_z(pts, np.deg2rad(-30))
-    return pts
-
-
-def rotate_z(points, angle):
-    """
-    Rotate an array of 3D points around the z axis by a given angle in radians.
-    """
-    rotation_matrix = np.array(
-        [
-            [np.cos(angle), -np.sin(angle), 0],
-            [np.sin(angle), np.cos(angle), 0],
-            [0, 0, 1],
-        ]
-    )
-
-    rotated_points = np.dot(points, rotation_matrix.T)
-
-    return rotated_points
+    return episodic_xy
 
 
 @dataclass
