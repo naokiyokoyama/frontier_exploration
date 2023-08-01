@@ -1,13 +1,22 @@
 import cv2
 import numpy as np
-from frontier_exploration.utils.general_utils import wrap_heading
+
+from .general_utils import wrap_heading
 
 
-def get_two_farthest_points(source, cnt):
+def get_two_farthest_points(source, cnt, agent_yaw):
     """Returns the two points in the contour cnt that form the smallest and largest
     angles from the source point."""
     pts = cnt.reshape(-1, 2)
-    angles = np.arctan2(pts[:, 1] - source[1], pts[:, 0] - source[0])
+    pts = pts - source
+    rotation_matrix = np.array(
+        [
+            [np.cos(-agent_yaw), -np.sin(-agent_yaw)],
+            [np.sin(-agent_yaw), np.cos(-agent_yaw)],
+        ]
+    )
+    pts = np.matmul(pts, rotation_matrix)
+    angles = np.arctan2(pts[:, 1], pts[:, 0])
     # Get the two points that form the smallest and largest angles from the source
     min_idx = np.argmin(angles)
     max_idx = np.argmax(angles)
@@ -51,9 +60,10 @@ def reveal_fog_of_war(
     current_angle: float,
     fov: float = 90,
     max_line_len: float = 100,
+    enable_debug_visualization: bool = False,
 ) -> np.ndarray:
     curr_pt_cv2 = current_point[::-1].astype(int)
-    angle_cv2 = np.rad2deg(wrap_heading(-current_angle + np.pi/2))
+    angle_cv2 = np.rad2deg(wrap_heading(-current_angle + np.pi / 2))
 
     cone_mask = cv2.ellipse(
         np.zeros_like(top_down_map),
@@ -79,7 +89,10 @@ def reveal_fog_of_war(
     # Find the two points in each contour that form the smallest and largest angles
     # from the current position
     points = np.array(
-        [get_two_farthest_points(curr_pt_cv2, cnt) for cnt in obstacle_contours]
+        [
+            get_two_farthest_points(curr_pt_cv2, cnt, current_angle)
+            for cnt in obstacle_contours
+        ]
     ).reshape((-1, 2, 2))
 
     # Fragment the cone using obstacles and two lines per obstacle in the cone
@@ -104,7 +117,99 @@ def reveal_fog_of_war(
         return current_fog_of_war_mask  # the closest contour was too far away
 
     new_fog = cv2.drawContours(current_fog_of_war_mask, [visible_area], 0, 1, -1)
+
+    if enable_debug_visualization:
+        vis_top_down_map = top_down_map * 255
+        vis_top_down_map = cv2.cvtColor(vis_top_down_map, cv2.COLOR_GRAY2BGR)
+        vis_top_down_map[top_down_map > 0] = (60, 60, 60)
+        vis_top_down_map[top_down_map == 0] = (255, 255, 255)
+        cv2.circle(vis_top_down_map, tuple(curr_pt_cv2), 3, (255, 192, 15), -1)
+        cv2.imshow("vis_top_down_map", vis_top_down_map)
+        cv2.waitKey(0)
+
+        cone_minus_obstacles = cv2.bitwise_and(cone_mask, top_down_map)
+        vis_cone_minus_obstacles = vis_top_down_map.copy()
+        vis_cone_minus_obstacles[cone_minus_obstacles == 1] = (127, 127, 127)
+        cv2.imshow("vis_cone_minus_obstacles", vis_cone_minus_obstacles)
+        cv2.waitKey(0)
+
+        vis_obstacles_mask = vis_cone_minus_obstacles.copy()
+        cv2.drawContours(vis_obstacles_mask, obstacle_contours, -1, (0, 0, 255), 2)
+        cv2.imshow("vis_obstacles_mask", vis_obstacles_mask)
+        cv2.waitKey(0)
+
+        vis_points_mask = vis_obstacles_mask.copy()
+        for point in points.reshape(-1, 2):
+            cv2.circle(vis_points_mask, tuple(point), 3, (0, 255, 0), -1)
+        cv2.imshow("vis_points_mask", vis_points_mask)
+        cv2.waitKey(0)
+
+        vis_lines_mask = vis_points_mask.copy()
+        cv2.polylines(
+            vis_lines_mask, line_points, isClosed=False, color=(0, 0, 255), thickness=2
+        )
+        cv2.imshow("vis_lines_mask", vis_lines_mask)
+        cv2.waitKey(0)
+
+        vis_final_contours = vis_top_down_map.copy()
+        # Draw each contour in a random color
+        for cnt in final_contours:
+            color = tuple([int(i) for i in np.random.randint(0, 255, 3)])
+            cv2.drawContours(vis_final_contours, [cnt], -1, color, -1)
+        cv2.imshow("vis_final_contours", vis_final_contours)
+        cv2.waitKey(0)
+
+        vis_final = vis_top_down_map.copy()
+        # Draw each contour in a random color
+        cv2.drawContours(vis_final, [visible_area], -1, (127, 127, 127), -1)
+        cv2.imshow("vis_final", vis_final)
+        cv2.waitKey(0)
+
     return new_fog
+
+
+def visualize(
+    top_down: np.ndarray,
+    fog_mask: np.ndarray,
+    agent_pos: np.ndarray,
+    agent_yaw: float,
+    agent_size: int,
+) -> np.ndarray:
+    """
+    Visualize the top-down map with the fog of war and the current position/heading of
+    the agent superimposed on top. Fog of war is shown in gray, the current position is
+    shown in blue, and the current heading is shown as a line segment stemming from the
+    center of the agent towards the heading direction.
+
+    Args:
+        top_down: The top-down map of the environment.
+        fog_mask: The fog of war mask.
+        agent_pos: The current position of the agent.
+        agent_yaw: The current heading of the agent.
+        agent_size: The size (radius) of the agent, in pixels.
+    Returns:
+        The visualization of the top-down map with the fog of war and the current
+        position/heading of the agent superimposed on top.
+    """
+    img_size = (*top_down.shape[:2], 3)
+    viz = np.ones(img_size, dtype=np.uint8) * np.array((60, 60, 60), dtype=np.uint8)
+    viz[top_down == 0] = (255, 255, 255)
+    viz[fog_mask > 0] = (127, 127, 127)
+    cv2.circle(viz, agent_pos[::-1], agent_size, (255, 192, 15), -1)
+
+    heading_end_pt = (
+        agent_size * 1.4 * np.array([np.sin(agent_yaw), np.cos(agent_yaw)])
+    ) + agent_pos[::-1]
+
+    # Draw a line from the current position showing the current_angle
+    cv2.line(
+        viz,
+        agent_pos[::-1],
+        (int(heading_end_pt[0]), int(heading_end_pt[1])),
+        (0, 0, 0),
+        max(1, agent_size // 4),
+    )
+    return viz
 
 
 if __name__ == "__main__":
@@ -146,26 +251,8 @@ if __name__ == "__main__":
         times.append(time.time() - t_start)
 
         if SHOW:
-            viz = np.ones((window_size, window_size, 3), dtype=np.uint8) * np.array(
-                (60, 60, 60), dtype=np.uint8
-            )
-            viz[top_down_map == 0] = (255, 255, 255)
-            viz[fog > 0] = (127, 127, 127)
-            cv2.circle(viz, current_point[::-1], agent_radius, (255, 192, 15), -1)
-
-            heading_end_pt = (
-                agent_radius
-                * 1.4
-                * np.array([np.sin(current_angle), np.cos(current_angle)])
-            ) + current_point[::-1]
-
-            # Draw a line from the current position showing the current_angle
-            cv2.line(
-                viz,
-                current_point[::-1],
-                (int(heading_end_pt[0]), int(heading_end_pt[1])),
-                (0, 0, 0),
-                max(1, agent_radius // 4),
+            viz = visualize(
+                top_down_map, fog, current_point, current_angle, agent_radius
             )
             cv2.imshow("viz", viz)
             key = cv2.waitKey(0)
