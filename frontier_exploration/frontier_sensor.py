@@ -52,9 +52,11 @@ class FrontierSensor(Sensor):
             ]
             self.episodic_yaw = heading_sensor.get_observation(None, episode)[0]
 
-        explorer: BaseExplorer = task.sensor_suite.sensors[  # type: ignore
-            "base_explorer"
-        ]
+        explorer_key = [
+            k for k in task.sensor_suite.sensors.keys() if k.endswith("_explorer")
+        ][0]
+
+        explorer: BaseExplorer = task.sensor_suite.sensors[explorer_key]  # type: ignore
 
         if len(explorer.frontier_waypoints) == 0:
             return np.zeros((1, 3), dtype=np.float32)
@@ -84,13 +86,12 @@ class FrontierSensor(Sensor):
 
         episodic_frontiers = []
         for g_frontier in global_frontiers:
-            pt = global_to_episodic_xy(
-                episode_origin, self.episodic_yaw, g_frontier
-            )
+            pt = global_to_episodic_xy(episode_origin, self.episodic_yaw, g_frontier)
             episodic_frontiers.append(pt)
         episodic_frontiers = np.array(episodic_frontiers)
 
         return episodic_frontiers
+
 
 def global_to_episodic_xy(episodic_start, episodic_yaw, pt):
     """
