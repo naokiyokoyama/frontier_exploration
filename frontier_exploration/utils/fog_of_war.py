@@ -88,12 +88,16 @@ def reveal_fog_of_war(
 
     # Find the two points in each contour that form the smallest and largest angles
     # from the current position
-    points = np.array(
-        [
-            get_two_farthest_points(curr_pt_cv2, cnt, current_angle)
-            for cnt in obstacle_contours
-        ]
-    ).reshape((-1, 2, 2))
+    points = []
+    for cnt in obstacle_contours:
+        if cv2.isContourConvex(cnt):
+            pt1, pt2 = get_two_farthest_points(curr_pt_cv2, cnt, angle_cv2)
+            points.append(pt1.reshape(-1, 2))
+            points.append(pt2.reshape(-1, 2))
+        else:
+            # Just add every point in the contour
+            points.append(cnt.reshape(-1, 2))
+    points = np.concatenate(points, axis=0)
 
     # Fragment the cone using obstacles and two lines per obstacle in the cone
     visible_cone_mask = cv2.bitwise_and(cone_mask, top_down_map)
@@ -134,7 +138,7 @@ def reveal_fog_of_war(
         cv2.waitKey(0)
 
         vis_obstacles_mask = vis_cone_minus_obstacles.copy()
-        cv2.drawContours(vis_obstacles_mask, obstacle_contours, -1, (0, 0, 255), 2)
+        cv2.drawContours(vis_obstacles_mask, obstacle_contours, -1, (0, 0, 255), 1)
         cv2.imshow("vis_obstacles_mask", vis_obstacles_mask)
         cv2.waitKey(0)
 
