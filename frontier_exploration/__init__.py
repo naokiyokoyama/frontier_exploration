@@ -12,10 +12,10 @@ try:
 except ModuleNotFoundError as e:
     # If the error was due to the habitat package not being installed, then pass, but
     # print a warning. Do not pass if it was due to another package being missing.
-    if e.name not in ["habitat", "habitat_sim"]:
+    if "habitat" not in e.name:
         raise e
     else:
         print(
-            "Warning: habitat package not installed. Cannot register habitat_baselines "
+            "Warning: importing habitat failed. Cannot register habitat_baselines "
             "components."
         )
