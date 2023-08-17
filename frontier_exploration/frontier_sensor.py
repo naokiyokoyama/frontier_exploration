@@ -38,7 +38,7 @@ class FrontierSensor(Sensor):
 
     def _get_observation_space(self, *args: Any, **kwargs: Any) -> Space:
         return spaces.Box(
-            low=-float("inf"), high=float("inf"), shape=(1, 3), dtype=np.float32
+            low=-float("inf"), high=float("inf"), shape=(1, 2), dtype=np.float32
         )
 
     def get_observation(
@@ -59,7 +59,7 @@ class FrontierSensor(Sensor):
         explorer: BaseExplorer = task.sensor_suite.sensors[explorer_key]  # type: ignore
 
         if len(explorer.frontier_waypoints) == 0:
-            return np.zeros((1, 3), dtype=np.float32)
+            return np.zeros((1, 2), dtype=np.float32)
 
         global_frontiers = explorer._pixel_to_map_coors(explorer.frontier_waypoints)
 
