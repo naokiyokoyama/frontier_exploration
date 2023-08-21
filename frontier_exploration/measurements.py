@@ -1,13 +1,16 @@
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Dict
 
 import cv2
 import numpy as np
 from habitat import EmbodiedTask, registry
 from habitat.config import read_write
 from habitat.config.default_structured_configs import TopDownMapMeasurementConfig
-from habitat.tasks.nav.nav import NavigationEpisode, TopDownMap
+from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
+from habitat.tasks.nav.nav import HeadingSensor, NavigationEpisode, TopDownMap
+from habitat.tasks.nav.object_nav_task import ObjectGoalNavEpisode
+from habitat.utils.geometry_utils import quaternion_from_coeff
 from habitat.utils.visualizations import maps
 from habitat.utils.visualizations.maps import (
     MAP_INVALID_POINT,
@@ -18,9 +21,11 @@ from habitat.utils.visualizations.maps import (
 )
 from habitat.utils.visualizations.utils import observations_to_image
 from hydra.core.config_store import ConfigStore
+from omegaconf import DictConfig
 
 from frontier_exploration.base_explorer import BaseExplorer
 from frontier_exploration.objnav_explorer import GreedyObjNavExplorer, ObjNavExplorer
+from frontier_exploration.utils.general_utils import habitat_to_xyz
 
 DEBUG = os.environ.get("MAP_DEBUG", "False").lower() == "true"
 if DEBUG:
@@ -31,8 +36,8 @@ if DEBUG:
 class FrontierExplorationMap(TopDownMap):
     def __init__(
         self,
-        sim: "HabitatSim",
-        config: "DictConfig",
+        sim: HabitatSim,
+        config: DictConfig,
         task: EmbodiedTask,
         *args: Any,
         **kwargs: Any,
@@ -56,13 +61,35 @@ class FrontierExplorationMap(TopDownMap):
         self._explorer_sensor = None
         self._draw_waypoints: bool = config.draw_waypoints
         self._is_feasible: bool = True
+        self._static_metrics: Dict[str, Any] = {}  # only updated once per episode
 
     def reset_metric(
         self, episode: NavigationEpisode, *args: Any, **kwargs: Any
     ) -> None:
         assert "task" in kwargs, "task must be passed to reset_metric!"
         self._explorer_sensor = kwargs["task"].sensor_suite.sensors[self._explorer_uuid]
+        self._static_metrics = {}
         super().reset_metric(episode, *args, **kwargs)
+        self._draw_target_bbox_mask(episode)
+
+        # Expose sufficient info for drawing 3D points on the map
+        lower_bound, upper_bound = self._sim.pathfinder.get_bounds()
+        episodic_start_yaw = HeadingSensor._quat_to_xy_heading(
+            None,  # type: ignore
+            quaternion_from_coeff(episode.start_rotation).inverse(),
+        )[0]
+        x, y, z = habitat_to_xyz(np.array(episode.start_position))
+        self._static_metrics["upper_bound"] = (upper_bound[0], upper_bound[2])
+        self._static_metrics["lower_bound"] = (lower_bound[0], lower_bound[2])
+        self._static_metrics["grid_resolution"] = self._metric["map"].shape[:2]
+        self._static_metrics["tf_episodic_to_global"] = np.array(
+            [
+                [np.cos(episodic_start_yaw), -np.sin(episodic_start_yaw), 0, x],
+                [np.sin(episodic_start_yaw), np.cos(episodic_start_yaw), 0, y],
+                [0, 0, 1, z],
+                [0, 0, 0, 1],
+            ]
+        )
 
     def get_original_map(self):
         return self._explorer_sensor.top_down_map.copy()
@@ -113,6 +140,9 @@ class FrontierExplorationMap(TopDownMap):
             )
         self._metric["map"] = new_map
         self._metric["is_feasible"] = self._is_feasible
+
+        # Update self._metric with the static metrics
+        self._metric.update(self._static_metrics)
 
         if DEBUG:
             import time
@@ -170,6 +200,50 @@ class FrontierExplorationMap(TopDownMap):
                 break
 
         self._is_feasible = is_feasible
+
+    def _draw_target_bbox_mask(self, episode: NavigationEpisode):
+        """Save a mask that is the same size as self._top_down_map, and draw a filled
+        rectangle for each bounding box of each target in the episode"""
+        if not isinstance(episode, ObjectGoalNavEpisode):
+            return
+
+        bbox_mask = np.zeros_like(self._top_down_map)
+        for goal in episode.goals:
+            sem_scene = self._sim.semantic_annotations()
+            object_id = goal.object_id  # type: ignore
+            assert int(sem_scene.objects[object_id].id.split("_")[-1]) == int(
+                object_id
+            ), (
+                f"Object_id doesn't correspond to id in semantic scene objects"
+                f"dictionary for episode: {episode}"
+            )
+
+            center = sem_scene.objects[object_id].aabb.center
+            x_len, _, z_len = sem_scene.objects[object_id].aabb.sizes / 2.0
+
+            # Nodes to draw rectangle
+            corners = [
+                center + np.array([x, 0, z])
+                for x, z in [(-x_len, -z_len), (x_len, z_len)]
+                if self._is_on_same_floor(center[1])
+            ]
+
+            if not corners:
+                continue
+
+            map_corners = [
+                maps.to_grid(
+                    p[2],
+                    p[0],
+                    (self._top_down_map.shape[0], self._top_down_map.shape[1]),
+                    sim=self._sim,
+                )
+                for p in corners
+            ]
+            (y1, x1), (y2, x2) = map_corners
+            bbox_mask[y1:y2, x1:x2] = 1
+
+        self._static_metrics["target_bboxes_mask"] = bbox_mask
 
 
 @dataclass
