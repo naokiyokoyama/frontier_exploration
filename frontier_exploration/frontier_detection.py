@@ -29,6 +29,16 @@ def detect_frontier_waypoints(
             f"map_debug/{int(time.time())}_debug_explored_mask_{area_thresh}.png",
             explored_mask,
         )
+
+    if VISUALIZE:
+        img = cv2.cvtColor(full_map * 255, cv2.COLOR_GRAY2BGR)
+        img[explored_mask > 0] = (127, 127, 127)
+
+        cv2.imshow("inputs", img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+    explored_mask[full_map == 0] = 0
     frontiers = detect_frontiers(full_map, explored_mask, area_thresh)
     if VISUALIZE:
         img = cv2.cvtColor(full_map * 255, cv2.COLOR_GRAY2BGR)
@@ -101,17 +111,40 @@ def filter_out_small_unexplored(
     frontiers."""
     if area_thresh == -1:
         return explored_mask
-    unexplored_mask = np.where(explored_mask > 0, 0, full_map)
+
+    unexplored_mask = full_map.copy()
+    unexplored_mask[explored_mask > 0] = 0
+
+    if VISUALIZE:
+        img = cv2.cvtColor(unexplored_mask * 255, cv2.COLOR_GRAY2BGR)
+        cv2.imshow("unexplored mask", img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
     # Find contours in the unexplored mask
     contours, _ = cv2.findContours(
-        unexplored_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        unexplored_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
     )
+
+    if VISUALIZE:
+        img = cv2.cvtColor(unexplored_mask * 255, cv2.COLOR_GRAY2BGR)
+        # Draw the contours in red
+        cv2.drawContours(img, contours, -1, (0, 0, 255), 3)
+        cv2.imshow("unexplored mask with contours", img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
     # Add small unexplored areas to the explored map
-    new_explored_mask = explored_mask.copy()
     small_contours = []
-    for contour in contours:
+    for i, contour in enumerate(contours):
         if cv2.contourArea(contour) < area_thresh:
-            small_contours.append(contour)
+            mask = np.zeros_like(explored_mask)
+            mask = cv2.drawContours(mask, [contour], 0, 1, -1)
+            masked_values = unexplored_mask[mask.astype(bool)]
+            values = set(masked_values.tolist())
+            if 1 in values and len(values) == 1:
+                small_contours.append(contour)
+    new_explored_mask = explored_mask.copy()
     cv2.drawContours(new_explored_mask, small_contours, -1, 255, -1)
 
     if VISUALIZE and len(small_contours) > 0:

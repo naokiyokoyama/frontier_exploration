@@ -62,6 +62,7 @@ class FrontierExplorationMap(TopDownMap):
         self._draw_waypoints: bool = config.draw_waypoints
         self._is_feasible: bool = True
         self._static_metrics: Dict[str, Any] = {}  # only updated once per episode
+        self._task = task
 
     def reset_metric(
         self, episode: NavigationEpisode, *args: Any, **kwargs: Any
@@ -140,6 +141,8 @@ class FrontierExplorationMap(TopDownMap):
             )
         self._metric["map"] = new_map
         self._metric["is_feasible"] = self._is_feasible
+        if not self._is_feasible:
+            self._task._is_episode_active = False
 
         # Update self._metric with the static metrics
         self._metric.update(self._static_metrics)
@@ -177,27 +180,36 @@ class FrontierExplorationMap(TopDownMap):
         valid_with_viewpoints[
             valid_with_viewpoints == MAP_VIEW_POINT_INDICATOR
         ] = MAP_VALID_POINT
+        # Dilate valid_with_viewpoints by 2 pixels to ensure that the contour is not
+        # broken by pinching obstacles
+        valid_with_viewpoints = cv2.dilate(
+            valid_with_viewpoints, np.ones((3, 3), dtype=np.uint8)
+        )
         contours, _ = cv2.findContours(
             valid_with_viewpoints, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
         )
 
-        # For each contour, draw a filled mask, and then check if the start position is
-        # in the mask. If it is: if the mask for this contour has both MAP_VALID_POINT
-        # and MAP_VIEW_POINT_INDICATOR in self._top_down_map, then this episode is
-        # feasible. Otherwise, it is not.
-        is_feasible = False
-        for c in contours:
-            mask = np.zeros_like(valid_with_viewpoints)
-            mask = cv2.drawContours(mask, [c], 0, 1, -1)
-
-            # Check if the start position is in the mask
-            if mask[t_x, t_y] == 1:
-                masked_values = self._top_down_map[mask.astype(np.bool)]
-                values = set(masked_values.tolist())
-                is_feasible = (
-                    MAP_VALID_POINT in values and MAP_VIEW_POINT_INDICATOR in values
-                )
+        # Identify the contour that is closest to the start position
+        min_dist = np.inf
+        best_idx = 0
+        for idx, cnt in enumerate(contours):
+            dist = cv2.pointPolygonTest(cnt, (t_y, t_x), True)
+            if dist >= 0:
+                best_idx = idx
                 break
+            elif abs(dist) < min_dist:
+                min_dist = abs(dist)
+                best_idx = idx
+
+        # If the mask for this contour has both MAP_VALID_POINT and
+        # MAP_VIEW_POINT_INDICATOR in self._top_down_map, then this episode is feasible.
+        # Otherwise, it is not.
+        best_cnt = contours[best_idx]
+        mask = np.zeros_like(valid_with_viewpoints)
+        mask = cv2.drawContours(mask, [best_cnt], 0, 1, -1)  # type: ignore
+        masked_values = self._top_down_map[mask.astype(np.bool)]
+        values = set(masked_values.tolist())
+        is_feasible = MAP_VALID_POINT in values and MAP_VIEW_POINT_INDICATOR in values
 
         self._is_feasible = is_feasible
 
