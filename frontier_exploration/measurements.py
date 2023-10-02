@@ -141,8 +141,8 @@ class FrontierExplorationMap(TopDownMap):
             )
         self._metric["map"] = new_map
         self._metric["is_feasible"] = self._is_feasible
-        if not self._is_feasible:
-            self._task._is_episode_active = False
+        # if not self._is_feasible:
+        #     self._task._is_episode_active = False
 
         # Update self._metric with the static metrics
         self._metric.update(self._static_metrics)
@@ -207,7 +207,7 @@ class FrontierExplorationMap(TopDownMap):
         best_cnt = contours[best_idx]
         mask = np.zeros_like(valid_with_viewpoints)
         mask = cv2.drawContours(mask, [best_cnt], 0, 1, -1)  # type: ignore
-        masked_values = self._top_down_map[mask.astype(np.bool)]
+        masked_values = self._top_down_map[mask.astype(bool)]
         values = set(masked_values.tolist())
         is_feasible = MAP_VALID_POINT in values and MAP_VIEW_POINT_INDICATOR in values
 
