@@ -111,7 +111,7 @@ class FrontierExplorationMap(TopDownMap):
             if next_waypoint is not None:
                 cv2.circle(
                     new_map,
-                    tuple(next_waypoint[::-1].astype(np.int)),
+                    tuple(next_waypoint[::-1].astype(np.int32)),
                     circle_size,
                     MAP_INVALID_POINT,
                     1,
@@ -124,7 +124,7 @@ class FrontierExplorationMap(TopDownMap):
                 color = MAP_SOURCE_POINT_INDICATOR
             cv2.circle(
                 new_map,
-                waypoint[::-1].astype(np.int),
+                waypoint[::-1].astype(np.int32),
                 circle_size,
                 color,
                 1,
@@ -134,7 +134,7 @@ class FrontierExplorationMap(TopDownMap):
         if beeline_target is not None:
             cv2.circle(
                 new_map,
-                tuple(beeline_target[::-1].astype(np.int)),
+                tuple(beeline_target[::-1].astype(np.int32)),
                 circle_size * 2,
                 MAP_SOURCE_POINT_INDICATOR,
                 thickness,
