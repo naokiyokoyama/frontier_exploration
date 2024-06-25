@@ -42,17 +42,17 @@ class FrontierExplorationPolicy(Policy):
         masks,
         deterministic=False,
     ):
-        # Convert obs to torch.long
-        if BaseExplorer.cls_uuid in observations:
-            sensor_uuid = BaseExplorer.cls_uuid
-        elif ObjNavExplorer.cls_uuid in observations:
-            sensor_uuid = ObjNavExplorer.cls_uuid
-        elif GreedyObjNavExplorer.cls_uuid in observations:
-            sensor_uuid = GreedyObjNavExplorer.cls_uuid
+        matches = [i for i in observations.keys() if "explor" in i]
+        assert (
+            len(matches) <= 1
+        ), f"Expected 1 or no exploration sensor, got {len(matches)}"
+        if matches:
+            sensor_uuid = matches[0]
         elif "teacher_label" in observations:
             sensor_uuid = "teacher_label"
         else:
             raise RuntimeError("FrontierExplorationPolicy needs an exploration sensor")
+        # Convert obs to torch.long
         action = observations[sensor_uuid].type(torch.long)
         if POLICY_ACTION_DATA:
             return PolicyActionData(actions=action, rnn_hidden_states=rnn_hidden_states)

@@ -23,8 +23,6 @@ from habitat.utils.visualizations.utils import observations_to_image
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig
 
-from frontier_exploration.base_explorer import BaseExplorer
-from frontier_exploration.objnav_explorer import GreedyObjNavExplorer, ObjNavExplorer
 from frontier_exploration.utils.general_utils import habitat_to_xyz
 
 DEBUG = os.environ.get("MAP_DEBUG", "False").lower() == "true"
@@ -43,12 +41,12 @@ class FrontierExplorationMap(TopDownMap):
         **kwargs: Any,
     ):
         self._explorer_uuid = None
-        for i in [BaseExplorer, ObjNavExplorer, GreedyObjNavExplorer]:
-            if i.cls_uuid in task._config.lab_sensors:
-                assert (
-                    self._explorer_uuid is None
-                ), "FrontierExplorationMap only supports 1 explorer sensor at a time!"
-                self._explorer_uuid = i.cls_uuid
+        matches = [i for i in task._config.lab_sensors.keys() if "explor" in i]
+        assert len(matches) == 1, (
+            "FrontierExplorationMap needs exactly 1 exploration sensor, but found "
+            f"{len(matches)}: {matches}"
+        )
+        self._explorer_uuid = matches[0]
 
         if self._explorer_uuid is None:
             raise RuntimeError("FrontierExplorationMap needs an exploration sensor!")
@@ -104,7 +102,6 @@ class FrontierExplorationMap(TopDownMap):
         new_map = self._metric["map"].copy()
         circle_size = 20 * self._map_resolution // 1024
         thickness = max(int(round(3 * self._map_resolution / 1024)), 1)
-        selected_frontier = self._explorer_sensor.closest_frontier_waypoint
 
         if self._draw_waypoints:
             next_waypoint = self._explorer_sensor.next_waypoint_pixels
@@ -117,28 +114,35 @@ class FrontierExplorationMap(TopDownMap):
                     1,
                 )
 
+        selected_frontier = self._explorer_sensor.closest_frontier_waypoint
         for waypoint in self._explorer_sensor.frontier_waypoints:
             if np.array_equal(waypoint, selected_frontier):
                 color = MAP_TARGET_POINT_INDICATOR
             else:
                 color = MAP_SOURCE_POINT_INDICATOR
-            cv2.circle(
-                new_map,
-                waypoint[::-1].astype(np.int32),
-                circle_size,
-                color,
-                1,
-            )
+            try:
+                cv2.circle(
+                    new_map,
+                    waypoint[::-1].astype(np.int32),
+                    circle_size,
+                    color,
+                    1,
+                )
+            except OverflowError:
+                pass
 
         beeline_target = getattr(self._explorer_sensor, "beeline_target_pixels", None)
         if beeline_target is not None:
-            cv2.circle(
-                new_map,
-                tuple(beeline_target[::-1].astype(np.int32)),
-                circle_size * 2,
-                MAP_SOURCE_POINT_INDICATOR,
-                thickness,
-            )
+            try:
+                cv2.circle(
+                    new_map,
+                    tuple(beeline_target[::-1].astype(np.int32)),
+                    circle_size * 2,
+                    MAP_SOURCE_POINT_INDICATOR,
+                    thickness,
+                )
+            except OverflowError:
+                pass
         self._metric["map"] = new_map
         self._metric["is_feasible"] = self._is_feasible
         # if not self._is_feasible:
@@ -177,9 +181,9 @@ class FrontierExplorationMap(TopDownMap):
 
         # Compute contours that contain MAP_VALID_POINT and/or MAP_VIEW_POINT_INDICATOR
         valid_with_viewpoints = self._top_down_map.copy()
-        valid_with_viewpoints[
-            valid_with_viewpoints == MAP_VIEW_POINT_INDICATOR
-        ] = MAP_VALID_POINT
+        valid_with_viewpoints[valid_with_viewpoints == MAP_VIEW_POINT_INDICATOR] = (
+            MAP_VALID_POINT
+        )
         # Dilate valid_with_viewpoints by 2 pixels to ensure that the contour is not
         # broken by pinching obstacles
         valid_with_viewpoints = cv2.dilate(

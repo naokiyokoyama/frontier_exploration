@@ -67,10 +67,15 @@ class ObjNavExplorer(BaseExplorer):
             return None
         return self._map_coors_to_pixel(self._beeline_target)
 
+    def _pre_step(self, episode):
+        super()._pre_step(episode)
+        if self._episode._shortest_path_cache is None:
+            self._goal_dist_measure.reset_metric(episode, task=self._task)
+
     def get_observation(
         self, task: EmbodiedTask, episode, *args: Any, **kwargs: Any
     ) -> np.ndarray:
-        super()._pre_step(episode)
+        self._pre_step(episode)
         if self._state == State.EXPLORE:
             action = super().get_observation(task, episode, *args, **kwargs)
             if np.array_equal(action, ActionIDs.STOP):
@@ -203,22 +208,18 @@ class GreedyObjNavExplorer(ObjNavExplorer):
         # Identify the closest target object
         self._goal_dist_measure.update_metric(self._episode, task=self._task)
         pts_cache = self._episode._shortest_path_cache
-        if hasattr(pts_cache, "closest_end_point_index"):
-            if pts_cache.closest_end_point_index == -1:
-                return None
-            closest_point = pts_cache.requested_ends[
-                pts_cache.closest_end_point_index
-            ]
-        else:
-            idx, _ = self._astar_search(self._episode_view_points)
-            if idx is None:
-                return None
-            closest_point = self._episode_view_points[idx]
+        if pts_cache.closest_end_point_index == -1:
+            return None
+        closest_point = pts_cache.requested_ends[
+            pts_cache.closest_end_point_index
+        ]
         # Identify the frontier waypoint closest to this object
         sim_waypoints = self._pixel_to_map_coors(self.frontier_waypoints)
         idx, _ = self._astar_search(
             sim_waypoints, start_position=closest_point
         )
+        if idx is None:
+            return None
 
         return self.frontier_waypoints[idx]
 

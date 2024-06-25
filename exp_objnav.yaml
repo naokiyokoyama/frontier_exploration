@@ -13,17 +13,23 @@ defaults:
     - objectgoal_sensor
     - compass_sensor
     - gps_sensor
-    - objnav_explorer
+    - exploration_episode_generator
 
   - _self_
 
 habitat:
   environment:
+    max_episode_steps: 2000
     iterator_options:
       max_scene_repeat_steps: 50000
   task:
     success_reward: 2.5
     slack_reward: -1e-3
+  simulator:
+    habitat_sim_v0:
+      allow_sliding: True
+    forward_step_size: 0.5
+    turn_angle: 30
 
 habitat_baselines:
   torch_gpu_id: 0
@@ -43,6 +49,9 @@ habitat_baselines:
 
   eval:
     split: "val"
+    should_load_ckpt: False
+
+  load_resume_state_config: False
 
   rl:
 
@@ -84,7 +93,7 @@ habitat_baselines:
       # Whether or not the visual encoder backbone will be trained.
       train_encoder: True
       # Whether or not to reset the critic linear layer
-      reset_critic: True
+      reset_critic: False
 
       # Model parameters
       backbone: resnet50

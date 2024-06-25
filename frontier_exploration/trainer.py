@@ -5,6 +5,10 @@ from habitat_baselines.common.obs_transformers import (
     apply_obs_transforms_obs_space,
     get_active_obs_transforms,
 )
+from habitat_baselines.rl.ddppo.algo import DDPPO  # noqa: F401.
+from habitat_baselines.rl.ppo.single_agent_access_mgr import (  # noqa: F401.
+    SingleAgentAccessMgr,
+)
 from omegaconf import DictConfig
 
 
@@ -14,6 +18,7 @@ class DummyAgent:
 
     def load_state_dict(self, *args, **kwargs):
         pass
+
 
 @baseline_registry.register_trainer(name="nonlearned_policy")
 class NonLearnedTrainer(PPOTrainer):
