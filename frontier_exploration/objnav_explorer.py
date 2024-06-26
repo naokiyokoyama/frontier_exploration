@@ -46,9 +46,7 @@ class ObjNavExplorer(BaseExplorer):
         self._state = State.EXPLORE
         self._beeline_target = None
         self._target_yaw = None
-        self._goal_dist_measure = task.measurements.measures[
-            DistanceToGoal.cls_uuid
-        ]
+        self._goal_dist_measure = task.measurements.measures[DistanceToGoal.cls_uuid]
         self._step_count = 0
 
     def _reset(self, episode):
@@ -93,29 +91,22 @@ class ObjNavExplorer(BaseExplorer):
         else:
             # Transition to another state if necessary
             min_dist = self._get_min_dist()
-            if (
-                self._state == State.BEELINE
-                and min_dist < self._success_distance
-            ):
+            if self._state == State.BEELINE and min_dist < self._success_distance:
                 # Change to PIVOT state if already within success distance
                 closest_point = self.identify_closest_viewpoint()
                 closest_rot = closest_point.agent_state.rotation
-                self._target_yaw = 2 * np.arctan2(
-                    closest_rot[1], closest_rot[3]
-                )
+                self._target_yaw = 2 * np.arctan2(closest_rot[1], closest_rot[3])
                 self._state = State.PIVOT
-            elif (
-                self._state == State.PIVOT
-                and min_dist > self._success_distance
-            ):
+            elif self._state == State.PIVOT and min_dist > self._success_distance:
                 # Change to BEELINE state if now out of the success distance
                 self._state = State.BEELINE
 
             # Execute the appropriate behavior for the current state
             if self._state == State.BEELINE:
-                self._beeline_target = (
-                    self._episode._shortest_path_cache.points[-1]
-                )
+                pts_cache = self._episode._shortest_path_cache
+                self._beeline_target = pts_cache.requested_ends[
+                    pts_cache.closest_end_point_index
+                ]
                 action = self._decide_action(self._beeline_target)
             elif self._state == State.PIVOT:
                 action = self._pivot()
@@ -159,9 +150,7 @@ class ObjNavExplorer(BaseExplorer):
             view_points = [ObjectViewLocation(agent_state, None)]
         min_dist, min_idx = float("inf"), None
         for i, view_point in enumerate(view_points):
-            dist = np.linalg.norm(
-                view_point.agent_state.position - self.agent_position
-            )
+            dist = np.linalg.norm(view_point.agent_state.position - self.agent_position)
             if dist < min_dist:
                 min_dist, min_idx = dist, i
         return view_points[min_idx]
@@ -179,9 +168,7 @@ class ObjNavExplorer(BaseExplorer):
 
     def _update_fog_of_war_mask(self):
         updated = (
-            super()._update_fog_of_war_mask()
-            if self._state == State.EXPLORE
-            else False
+            super()._update_fog_of_war_mask() if self._state == State.EXPLORE else False
         )
 
         min_dist = self._get_min_dist()
@@ -191,9 +178,10 @@ class ObjNavExplorer(BaseExplorer):
             # set threshold
             if min_dist < self._beeline_dist_thresh:
                 self._state = State.BEELINE
-                self._beeline_target = (
-                    self._episode._shortest_path_cache.points[-1]
-                )
+                pts_cache = self._episode._shortest_path_cache
+                self._beeline_target = pts_cache.requested_ends[
+                    pts_cache.closest_end_point_index
+                ]
 
         return updated
 
@@ -210,14 +198,10 @@ class GreedyObjNavExplorer(ObjNavExplorer):
         pts_cache = self._episode._shortest_path_cache
         if pts_cache.closest_end_point_index == -1:
             return None
-        closest_point = pts_cache.requested_ends[
-            pts_cache.closest_end_point_index
-        ]
+        closest_point = pts_cache.requested_ends[pts_cache.closest_end_point_index]
         # Identify the frontier waypoint closest to this object
         sim_waypoints = self._pixel_to_map_coors(self.frontier_waypoints)
-        idx, _ = self._astar_search(
-            sim_waypoints, start_position=closest_point
-        )
+        idx, _ = self._astar_search(sim_waypoints, start_position=closest_point)
         if idx is None:
             return None
 

@@ -4,6 +4,7 @@ import glob
 import json
 import os
 import os.path as osp
+import random
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,7 +12,6 @@ import cv2
 import numpy as np
 from habitat import EmbodiedTask, registry
 from habitat.core.dataset import Episode
-from habitat.datasets.pointnav.pointnav_generator import _ratio_sample_rate
 from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
 from habitat.utils.visualizations import maps
 from hydra.core.config_store import ConfigStore
@@ -20,14 +20,18 @@ from omegaconf import DictConfig
 from frontier_exploration.base_explorer import ActionIDs, BaseExplorer
 from frontier_exploration.objnav_explorer import (
     GreedyObjNavExplorer,
+    ObjNavExplorer,
     ObjNavExplorerSensorConfig,
     State,
 )
-from frontier_exploration.utils.path_utils import get_path
+from frontier_exploration.utils.fog_of_war import reveal_fog_of_war
+from frontier_exploration.utils.general_utils import wrap_heading
+
+EXPLORATION_THRESHOLD = 0.1
 
 
 @registry.register_sensor
-class ExplorationEpisodeGenerator(GreedyObjNavExplorer):
+class ExplorationEpisodeGenerator(ObjNavExplorer):
     cls_uuid: str = "exploration_episode_generator"
 
     def __init__(
@@ -40,30 +44,32 @@ class ExplorationEpisodeGenerator(GreedyObjNavExplorer):
     ) -> None:
         super().__init__(sim, config, task, *args, **kwargs)
         self._dataset_path = config.dataset_path
-        self._max_exploration_attempts = config.max_exploration_attempts
-        self._min_exploration_steps = config.min_exploration_steps
-        self._max_exploration_steps = config.max_exploration_steps
-        self._min_exploration_coverage = config.min_exploration_coverage
-        self._max_exploration_coverage = config.max_exploration_coverage
+        self._max_exploration_attempts: int = config.max_exploration_attempts
+        self._min_exploration_steps: int = config.min_exploration_steps
+        self._max_exploration_steps: int = config.max_exploration_steps
+        self._min_exploration_coverage: float = config.min_exploration_coverage
+        self._max_exploration_coverage: float = config.max_exploration_coverage
         self._map_measure = task.measurements.measures["top_down_map"]
 
         self._is_exploring: bool = False
 
         # Fields for storing data that will be recorded into the dataset
-        self._timestep_to_frontiers: dict = {}
         self._frontier_pose_to_id: dict = {}
         self._frontier_id_to_img: dict = {}
         self._exploration_poses: list[list[float]] = []
         self._exploration_imgs: list[np.ndarray] = []
+        self._gt_frontiers: list[FrontierInfo] = []
+        self._seen_frontiers: set[tuple[int, int]] = set()
 
         self._gt_fog_of_war_mask: np.ndarray | None = None
         self._seen_frontier_sets: set = set()
         self._curr_frontier_set: set = set()
         self._frontier_sets: list[FrontierSet] = []
         self._gt_path_poses: list[list[float]] = []
-        self._exploration_coverage: float = -1.0
         self._exploration_successful: bool = False
         self._start_z: float = -1.0
+        self._coverage_goal: float = -1.0
+        self._max_frontiers: int = 0
 
         # This will just be used for debugging
         self._bad_episode: bool = False
@@ -71,8 +77,10 @@ class ExplorationEpisodeGenerator(GreedyObjNavExplorer):
     def _reset(self, episode: Episode) -> None:
         super()._reset(episode)
 
+        self._visibility_dist = self._config.visibility_dist
+        self._area_thresh = self._config.area_thresh
+
         self._is_exploring = False
-        self._timestep_to_frontiers = {}
         self._frontier_pose_to_id = {}
         self._frontier_id_to_img = {}
 
@@ -83,8 +91,10 @@ class ExplorationEpisodeGenerator(GreedyObjNavExplorer):
         self._exploration_imgs = []
         self._frontier_sets = []
         self._gt_path_poses = []
-        self._exploration_coverage = -1.0
         self._exploration_successful = False
+        self._gt_frontiers = []
+        self._seen_frontiers = set()
+        self._max_frontiers = 0
 
         # If the last episode failed, then we need to record the episode's id and its
         # scene id for further debugging
@@ -104,55 +114,91 @@ class ExplorationEpisodeGenerator(GreedyObjNavExplorer):
         self._bad_episode = False
         self._start_z = self._sim.get_agent_state().position[1]
 
+        self._coverage_goal = random.uniform(
+            self._min_exploration_coverage + EXPLORATION_THRESHOLD,
+            self._max_exploration_coverage - EXPLORATION_THRESHOLD,
+        )
+
     def _record_curr_pose(self) -> None:
         """
         Records the current pose of the agent.
         """
         # Record the current pose
-        quat = self._sim.get_agent_state().rotation
-        yaw = 2 * np.arctan2(quat.y, quat.w)
-        curr_pose = [*self._sim.get_agent_state().position, yaw]
-        curr_pose = [float(f) for f in curr_pose]
+        curr_pose = self._curr_pose
         if self._is_exploring:
             self._exploration_poses.append(curr_pose)
         else:
             self._gt_path_poses.append(curr_pose)
 
-    def _record_frontiers(self, rgb: np.ndarray) -> None:
+    @property
+    def _curr_pose(self) -> list[float]:
+        quat = self._sim.get_agent_state().rotation
+        yaw = 2 * np.arctan2(quat.y, quat.w)
+        curr_pose = [*self._sim.get_agent_state().position, yaw]
+        curr_pose = [float(f) for f in curr_pose]
+        return curr_pose
+
+    def _record_frontiers(self) -> None:
         """
         Updates self._timestep_to_frontiers and self._frontier_pose_to_id with any new
         frontier information. Because the amount of new frontier images for one timestep
         can only be 0 or 1, the frontier id is simply set to the timestep.
         """
         if len(self.frontier_waypoints) == 0:
-            return
-        frontier_id = self._step_count - 1
-        for pose in self.frontier_waypoints:
-            # For each frontier, convert its pose to a tuple to make it hashable
-            pose = tuple(pose)
-            if pose not in self._frontier_pose_to_id:
-                # New frontier found
-                self._frontier_pose_to_id[pose] = frontier_id
-                # Assign image to current frontier_id (timestep) if not already done
-                if frontier_id not in self._timestep_to_frontiers:
-                    self._frontier_id_to_img[frontier_id] = rgb
+            return  # No frontiers to record
+        for f_position in self.frontier_waypoints:
+            # For each frontier, convert its position to a tuple to make it hashable
+            f_position_tuple: tuple[int, int] = tuple(f_position)  # noqa
+            seen_frontiers = set(f.frontier_position_px for f in self._gt_frontiers)
+            if f_position_tuple not in seen_frontiers:
+                # Encountered a new frontier
+                frontier_id = len(self._gt_frontiers)
+                self._gt_frontiers.append(
+                    FrontierInfo(
+                        agent_pose=self._curr_pose,
+                        frontier_position_px=f_position_tuple,
+                        rgb_img=self._look_at_waypoint(
+                            self._pixel_to_map_coors(f_position)
+                        ),
+                    )
+                )
+                self._frontier_pose_to_id[f_position_tuple] = frontier_id
 
         # Update the current frontier set by cross-referencing self.frontier_waypoints
         # against self._frontier_pose_to_id
         self._curr_frontier_set = set(
             self._frontier_pose_to_id[tuple(pose)] for pose in self.frontier_waypoints
         )
+        self._max_frontiers = max(self._max_frontiers, len(self._curr_frontier_set))
         if self._curr_frontier_set not in self._seen_frontier_sets:
             # New frontier set found
-            best_id = self._frontier_pose_to_id[tuple(self.closest_frontier_waypoint)]
+            self._seen_frontier_sets.add(tuple(self._curr_frontier_set))
             self._frontier_sets.append(
                 FrontierSet(
                     frontier_ids=list(self._curr_frontier_set),
-                    best_id=best_id,
+                    best_id=self._frontier_pose_to_id[
+                        tuple(self._correct_frontier_waypoint)
+                    ],
                     time_step=self._step_count - 1,
                 )
             )
-            self._seen_frontier_sets.add(tuple(self._curr_frontier_set))
+
+    @property
+    def _correct_frontier_waypoint(self) -> np.ndarray:
+        return GreedyObjNavExplorer._get_closest_waypoint(self)
+
+    def _look_at_waypoint(self, waypoint: np.ndarray) -> np.ndarray:
+        """
+        Returns the RGB image of the agent looking at a waypoint.
+        """
+        x_diff = waypoint[0] - self.agent_position[0]
+        y_diff = waypoint[2] - self.agent_position[2]
+        yaw = wrap_heading(-(np.arctan2(y_diff, x_diff) + np.pi / 2))
+        look_at_rot = np.array([0, np.sin(yaw / 2), 0, np.cos(yaw / 2)])
+        rgb = self._sim.get_observations_at(
+            position=self.agent_position, rotation=look_at_rot
+        )["rgb"]
+        return rgb
 
     def _sample_exploration_start(self) -> bool:
         """
@@ -173,70 +219,60 @@ class ExplorationEpisodeGenerator(GreedyObjNavExplorer):
             raise RuntimeError("Failed to sample a valid point")
 
         success = False
-        start, end = np.zeros(3), np.zeros(3)
+        start = sample_position_from_same_floor()
         for _ in range(self._max_exploration_attempts):
-            start = sample_position_from_same_floor()
-            end = sample_position_from_same_floor()
-
-            # Need to make sure that:
-            # - a navigable path exists between the start and end points
-            # - the start and end points are not too close to each other
-            # - the ratio between the Euclidean distance and the shortest path distance
-            #   is within a certain range
-            path = get_path(start, end, self._sim)
-            if path is None:
-                continue  # No path found
-            path_length = path.geodesic_distance
-            if not 1 <= path_length <= 30:
-                continue  # Path too short or too long
-            euclid_dist = np.power(
-                np.power(np.array(start) - np.array(end), 2).sum(0), 0.5
-            )
-            distances_ratio = path_length / euclid_dist
-            if distances_ratio < 1.1 and (
-                np.random.rand() > _ratio_sample_rate(distances_ratio, 1.1)
-            ):
-                continue  # Path too straight
-
-            # Sampled trajectory has to overlap with the ground truth trajectory
-            sampled_trajectory = self._get_trajectory_mask(path.points)
-            if (
-                check_mask_overlap(self._gt_fog_of_war_mask, sampled_trajectory)
-                < self._min_exploration_coverage
-            ):
-                continue  # not enough overlap
-
             # Start point must correspond to the same floor as the ground truth path
             sample_map = maps.get_topdown_map_from_sim(
                 self._sim,
                 map_resolution=self._map_resolution,
                 draw_border=False,
             )
-            if not np.array_equal(sample_map, self.top_down_map):
-                continue
-
-            success = True
-            break
-
-        self._beeline_target = end
-        self._state = State.BEELINE
-        rot = np.random.rand() * 2 * np.pi
-        sampled_rotation = np.array([0, np.sin(rot / 2), 0, np.cos(rot / 2)])
-        self._sim.set_agent_state(position=start, rotation=sampled_rotation)
+            if np.array_equal(sample_map, self.top_down_map):
+                success = True
+                rot = np.random.rand() * 2 * np.pi
+                sampled_rotation = np.array([0, np.sin(rot / 2), 0, np.cos(rot / 2)])
+                self._sim.set_agent_state(position=start, rotation=sampled_rotation)
+                break
+            print("Wrong floor! Resampling...")
+            start = sample_position_from_same_floor()
 
         return success
 
     def _decide_action(self, target: np.ndarray) -> np.ndarray:
         if self._is_exploring:
-            if (
-                self._get_min_dist() < self._success_distance
-                or len(self._exploration_poses) >= self._max_exploration_steps
-            ):
+            max_steps_reached = (
+                len(self._exploration_poses) >= self._max_exploration_steps
+            )
+            coverage_goal_reached = (
+                abs(self._coverage_goal - self._exploration_coverage)
+                < EXPLORATION_THRESHOLD
+            )
+            overshot = (
+                self._exploration_coverage > self._coverage_goal + EXPLORATION_THRESHOLD
+            )
+            if max_steps_reached or coverage_goal_reached or overshot:
                 return ActionIDs.STOP
         return super()._decide_action(target)
 
     def _update_fog_of_war_mask(self):
-        updated = BaseExplorer._update_fog_of_war_mask(self)
+        orig = self.fog_of_war_mask.copy()
+        if not self._is_exploring:
+            headings = (0, np.pi)
+            fov = 185  # A little more than 180 to ensure overlap
+        else:
+            headings = (self.agent_heading, )
+            fov = self._fov
+        for heading in headings:
+            self.fog_of_war_mask = reveal_fog_of_war(
+                self.top_down_map,
+                self.fog_of_war_mask,
+                self._get_agent_pixel_coords(),
+                heading,
+                fov=fov,
+                max_line_len=self._visibility_dist_in_pixels,
+            )
+        updated = not np.array_equal(orig, self.fog_of_war_mask)
+
         if not self._is_exploring:
             min_dist = self._get_min_dist()
             if self._state == State.EXPLORE:
@@ -248,22 +284,17 @@ class ExplorationEpisodeGenerator(GreedyObjNavExplorer):
 
         return updated
 
-    def _get_min_dist(self):
-        """Returns the minimum distance to the target"""
-        if self._is_exploring:
-            return self._sim.geodesic_distance(
-                self._sim.get_agent_state().position, [self._beeline_target]
-            )
-        return super()._get_min_dist()
-
-    def _reset_exploration(self) -> np.ndarray:
+    def _reset_exploration(self) -> bool:
         """
         Resets the exploration process by sampling a new starting pose and updating the
         exploration goal point.
 
         Returns:
-            np.ndarray: The action to take to start the exploration process.
+            bool: True if the exploration was successfully reset, False otherwise.
         """
+        self._area_thresh = self._config.exploration_area_thresh
+        self._visibility_dist = self._config.exploration_visibility_dist
+
         self.closest_frontier_waypoint = None
         self.frontier_waypoints = np.array([])
         self._exploration_poses = []
@@ -271,27 +302,10 @@ class ExplorationEpisodeGenerator(GreedyObjNavExplorer):
         self.fog_of_war_mask = np.zeros_like(self.top_down_map)
         self._agent_position = None
         self._agent_heading = None
-        success = self._sample_exploration_start()
-        if not success:
-            return ActionIDs.STOP
-        # Need to determine which action to take towards the beeline target
-        action = self._decide_action(self._beeline_target)
+        self._exploration_successful = False
+        self._first_frontier = False
 
-        return action
-
-    def _get_trajectory_mask(self, trajectory: list[np.ndarray]) -> np.ndarray:
-        waypoints = [self._map_coors_to_pixel(wp) for wp in trajectory]
-        # Draw lines that connect the waypoints
-        path_mask = np.zeros_like(self.top_down_map)
-        for i in range(len(waypoints) - 1):
-            cv2.line(
-                path_mask,
-                tuple(waypoints[i][::-1]),
-                tuple(waypoints[i + 1][::-1]),
-                1,
-                self._visibility_dist_in_pixels,
-            )
-        return path_mask
+        return self._sample_exploration_start()
 
     def _save_to_dataset(self, episode: Episode) -> None:
         """
@@ -318,15 +332,16 @@ class ExplorationEpisodeGenerator(GreedyObjNavExplorer):
 
         episode_json = osp.join(episode_dir, f"exploration_{exploration_id}.json")
         self._save_episode_json(episode_dir, exploration_imgs_dir, episode_json)
+        self._save_coverage_visualization(exploration_imgs_dir)
 
+    def _save_coverage_visualization(self, exploration_imgs_dir: str) -> None:
         # Save visualization of the coverage
         h, w = self.fog_of_war_mask.shape
         coverage_img = np.zeros((h, w, 3), dtype=np.uint8)
-        coverage_img[self.top_down_map == 1] = (255, 255, 255)
-        coverage_img[self.fog_of_war_mask == 1] = (0, 0, 255)
-        coverage_img[self._gt_fog_of_war_mask == 1] = (0, 255, 0)
-        # Make the overlap of the two fogs purple
-        coverage_img[
+        coverage_img[self.top_down_map == 1] = (255, 255, 255)  # White for free space
+        coverage_img[self.fog_of_war_mask == 1] = (0, 0, 255)  # Blue for explored
+        coverage_img[self._gt_fog_of_war_mask == 1] = (0, 255, 0)  # Green for GT
+        coverage_img[  # Purple for overlap
             np.logical_and(self.fog_of_war_mask == 1, self._gt_fog_of_war_mask == 1)
         ] = (255, 0, 255)
         coverage_img = add_text_to_image(
@@ -344,11 +359,11 @@ class ExplorationEpisodeGenerator(GreedyObjNavExplorer):
         """
         if not osp.exists(frontier_imgs_dir):
             os.makedirs(frontier_imgs_dir, exist_ok=True)
-        for frontier_id, img in self._frontier_id_to_img.items():
+        for frontier_id, f_info in enumerate(self._gt_frontiers):
             img_filename = osp.join(
                 frontier_imgs_dir, f"frontier_{frontier_id:04d}.jpg"
             )
-            img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            img_bgr = cv2.cvtColor(f_info.rgb_img, cv2.COLOR_RGB2BGR)
             cv2.imwrite(img_filename, img_bgr)
 
     def _save_exploration_imgs(self, exploration_imgs_dir: str) -> None:
@@ -380,15 +395,21 @@ class ExplorationEpisodeGenerator(GreedyObjNavExplorer):
             episode_json (str): The path to the JSON file to save the episode
                 information.
         """
-        # Get list of jpgs from the exploration_imgs_dir
+        frontiers = {}
+        for f_id, f_info in enumerate(self._gt_frontiers):
+            frontiers.update(f_info.to_dict(self, f_id, frontier_imgs_dir))
+
         json_data = {
             "episode_id": self._episode.episode_id,
             "scene_id": self._get_scene_id(),
             "exploration_id": int(osp.basename(exploration_imgs_dir).split("_")[-1]),
             "object_category": self._episode.object_category,
-            "num_time_steps": self._step_count,
             "gt_path_poses": self._gt_path_poses,
             "exploration_coverage": float(self._exploration_coverage),
+            "frontiers": frontiers,
+            "timestep_to_frontiers": {
+                fs.time_step: fs.to_dict() for fs in self._frontier_sets
+            },
             "exploration_poses": self._exploration_poses,
             "exploration_imgs": sorted(
                 [
@@ -396,13 +417,6 @@ class ExplorationEpisodeGenerator(GreedyObjNavExplorer):
                     for f in glob.glob(f"{exploration_imgs_dir}/*.jpg")
                 ]
             ),
-            "frontiers_ids_to_imgs": {
-                int(osp.basename(f).split("_")[1].split(".")[0]): f
-                for f in sorted(glob.glob(f"{frontier_imgs_dir}/*.jpg"))
-            },
-            "timestep_to_frontiers": {
-                fs.time_step: fs.to_dict() for fs in self._frontier_sets
-            },
         }
         with open(episode_json, "w") as f:
             json.dump(json_data, f)
@@ -410,27 +424,46 @@ class ExplorationEpisodeGenerator(GreedyObjNavExplorer):
     def _get_scene_id(self) -> str:
         return os.path.basename(self._episode.scene_id).split(".")[0]
 
+    @property
+    def _exploration_coverage(self):
+        return check_mask_overlap(
+            self._gt_fog_of_war_mask,
+            self.fog_of_war_mask,
+        )
+
     def get_observation(
         self, task: EmbodiedTask, episode, *args: Any, **kwargs: Any
     ) -> np.ndarray:
-        if self._state != State.EXPLORE:
-            # These functions are only called when self._state == State.EXPLORE, but for
-            # this class, we want to call it every step
-            self._update_frontiers()
-            self.closest_frontier_waypoint = self._get_closest_waypoint()
 
-        if self._is_exploring:
-            self._state = State.BEELINE
+        if not self._is_exploring:
+            if self._state != State.EXPLORE:
+                # These functions are only called when self._state == State.EXPLORE, but
+                # for this class, we want to call it every step
+                self._update_frontiers()
+                self.closest_frontier_waypoint = self._get_closest_waypoint()
+            print(
+                f"GT path: {len(self._gt_path_poses)} "
+                f"# frontiers: {len(self._curr_frontier_set)} "
+            )
+            action = super().get_observation(task, episode, *args, **kwargs)
+        else:
+            # BaseExplorer already calls _update_frontiers() and get_closest_waypoint()
+            # at every step no matter what, so we don't need to call them here
+            print(f"Exploring: {len(self._exploration_poses)}")
+            action = BaseExplorer.get_observation(self, task, episode, *args, **kwargs)
 
-        action = super().get_observation(task, episode, *args, **kwargs)
+        stop_called = np.array_equal(action, ActionIDs.STOP)
 
         self._record_curr_pose()
 
-        assert "observations" in kwargs, "Observations must be passed as a keyword arg"
         if not self._is_exploring:
-            self._record_frontiers(kwargs["observations"]["rgb"])
+            self._record_frontiers()
         else:
-            self._exploration_imgs.append(kwargs["observations"]["rgb"])
+            if len(self._exploration_poses) == 1:
+                rgb = self._sim.get_observations_at()["rgb"]
+            else:
+                rgb = kwargs["observations"]["rgb"]
+            self._exploration_imgs.append(rgb)
 
         # An episode is considered bad if the agent has timed out despite the episode
         # being feasible. However, since this sensor is always called before the map is
@@ -439,7 +472,6 @@ class ExplorationEpisodeGenerator(GreedyObjNavExplorer):
             self._bad_episode = False
         elif not self._is_exploring:  # Can stop checking once we start exploring
             feasible = self._map_measure.get_metric()["is_feasible"]
-            stop_called = np.array_equal(action, ActionIDs.STOP)
             if feasible:
                 self._bad_episode = not stop_called
             else:
@@ -449,33 +481,36 @@ class ExplorationEpisodeGenerator(GreedyObjNavExplorer):
 
             if feasible and stop_called:
                 # Ground truth path completed; move on to exploration phase
+
+                if self._max_frontiers < 2:
+                    print("Not enough frontiers!")
+                    task.is_stop_called = True
+                    return ActionIDs.STOP
+
                 self._is_exploring = True
                 self._gt_fog_of_war_mask = self.fog_of_war_mask.copy()
+                print("Ground truth path completed! Resetting exploration.")
 
                 # Reset the exploration
-                action = self._reset_exploration()
-                if action == ActionIDs.STOP:
+                success = self._reset_exploration()
+                if not success:
                     # Could not find a valid exploration path
+                    print("No valid exploration path found!")
                     task.is_stop_called = True
+                    return ActionIDs.STOP
                 else:
                     return self.get_observation(task, episode, *args, **kwargs)
         else:
             # Exploration is active. Check if exploration has successfully completed.
             if np.array_equal(action, ActionIDs.STOP):
-                # true:
                 # - The length of self._exploration_poses must be within the valid range
                 # - The coverage of the exploration must be within the valid range
-                self._exploration_coverage = check_mask_overlap(
-                    self._gt_fog_of_war_mask,
-                    self.fog_of_war_mask,
-                )
                 self._exploration_successful = (
                     self._min_exploration_steps
                     <= len(self._exploration_poses)
                     <= self._max_exploration_steps
-                    and self._min_exploration_coverage
-                    <= self._exploration_coverage
-                    <= self._max_exploration_coverage
+                    and abs(self._coverage_goal - self._exploration_coverage)
+                    < EXPLORATION_THRESHOLD
                 )
 
                 if self._exploration_successful:
@@ -486,26 +521,60 @@ class ExplorationEpisodeGenerator(GreedyObjNavExplorer):
                     print("Exploration failed!")
                     print(f"{self._exploration_coverage=}")
                     print(f"{len(self._exploration_poses)=}")
-                    action = self._reset_exploration()
-                    if action == ActionIDs.STOP:
+                    success = self._reset_exploration()
+                    if not success:
                         # Could not find a valid exploration path
                         task.is_stop_called = True
+                        return ActionIDs.STOP
                     else:
                         return self.get_observation(task, episode, *args, **kwargs)
+        if stop_called:
+            task.is_stop_called = True
 
         return action
 
 
+class FrontierInfo:
+    def __init__(
+        self,
+        agent_pose: list[float],
+        frontier_position_px: tuple[int, int],
+        rgb_img: np.ndarray,
+    ):
+        self.agent_pose = agent_pose
+        self.frontier_position_px = frontier_position_px
+        self.rgb_img = rgb_img
+
+    def to_dict(
+        self,
+        explorer_ep_gen: ExplorationEpisodeGenerator,
+        frontier_id: int,
+        frontier_imgs_dir: str,
+    ):
+        return {
+            frontier_id: {
+                "agent_pose": self.agent_pose,
+                "frontier_position_px": list(self.frontier_position_px),
+                "frontier_position": explorer_ep_gen._pixel_to_map_coors(  # noqa
+                    np.array(self.frontier_position_px)
+                ).tolist(),
+                "frontier_img_path": osp.join(
+                    frontier_imgs_dir, f"frontier_{frontier_id:04d}.jpg"
+                ),
+            }
+        }
+
+
 class FrontierSet:
     def __init__(self, frontier_ids: list[int], best_id: int, time_step: int):
-        self.frontier_ids = frontier_ids
-        self.best_id = best_id
+        self._frontier_ids = frontier_ids
+        self._best_id = best_id
         self.time_step = time_step
 
     def to_dict(self):
         return {
-            "frontier_ids": self.frontier_ids,
-            "best_id": self.best_id,
+            "frontier_ids": self._frontier_ids,
+            "best_id": self._best_id,
         }
 
 
@@ -517,11 +586,13 @@ class ExplorationEpisodeGeneratorConfig(ObjNavExplorerSensorConfig):
     beeline_dist_thresh: float = 8  # meters
     success_distance: float = 0.1  # meters
     dataset_path: str = "data/exploration_episodes/"
-    max_exploration_attempts: int = 1000
-    min_exploration_steps: int = 10
+    max_exploration_attempts: int = 100
+    min_exploration_steps: int = 20
     max_exploration_steps: int = 100
     min_exploration_coverage: float = 0.1
-    max_exploration_coverage: float = 0.6
+    max_exploration_coverage: float = 0.9
+    exploration_visibility_dist: float = 5.5
+    exploration_area_thresh: float = 4.0
 
 
 cs = ConfigStore.instance()
@@ -545,26 +616,6 @@ def extract_scene_id(episode: Episode) -> str:
     """
     scene_id = os.path.basename(episode.scene_id).split(".")[0]
     return scene_id
-
-
-def convert_to_frontier_filenames(
-    episode_dir: str, frontier_ids: list[int]
-) -> list[str]:
-    """
-    Converts a list of frontier ids to a list of filenames.
-
-    Args:
-        episode_dir (str): The path to the episode directory.
-        frontier_ids (list[int]): A list of frontier ids.
-
-    Returns:
-        list[str]: A list of filenames corresponding to the frontier ids.
-    """
-    return [
-        osp.join(episode_dir, f"frontier_imgs/frontier_{frontier_id:04d}.jpg")
-        for frontier_id in frontier_ids
-    ]
-
 
 def check_mask_overlap(mask_1: np.ndarray, mask_2: np.ndarray) -> float:
     """
