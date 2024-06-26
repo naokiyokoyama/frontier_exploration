@@ -4,7 +4,6 @@ import glob
 import json
 import os
 import os.path as osp
-import random
 from dataclasses import dataclass
 from typing import Any
 
@@ -68,8 +67,8 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         self._gt_path_poses: list[list[float]] = []
         self._exploration_successful: bool = False
         self._start_z: float = -1.0
-        self._coverage_goal: float = -1.0
         self._max_frontiers: int = 0
+        self._coverage_history: list[float] = []
 
         # This will just be used for debugging
         self._bad_episode: bool = False
@@ -95,6 +94,7 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         self._gt_frontiers = []
         self._seen_frontiers = set()
         self._max_frontiers = 0
+        self._coverage_history = []
 
         # If the last episode failed, then we need to record the episode's id and its
         # scene id for further debugging
@@ -113,11 +113,6 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
 
         self._bad_episode = False
         self._start_z = self._sim.get_agent_state().position[1]
-
-        self._coverage_goal = random.uniform(
-            self._min_exploration_coverage + EXPLORATION_THRESHOLD,
-            self._max_exploration_coverage - EXPLORATION_THRESHOLD,
-        )
 
     def _record_curr_pose(self) -> None:
         """
@@ -243,14 +238,8 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
             max_steps_reached = (
                 len(self._exploration_poses) >= self._max_exploration_steps
             )
-            coverage_goal_reached = (
-                abs(self._coverage_goal - self._exploration_coverage)
-                < EXPLORATION_THRESHOLD
-            )
-            overshot = (
-                self._exploration_coverage > self._coverage_goal + EXPLORATION_THRESHOLD
-            )
-            if max_steps_reached or coverage_goal_reached or overshot:
+            overshot = self._exploration_coverage > self._max_exploration_coverage
+            if max_steps_reached or overshot:
                 return ActionIDs.STOP
         return super()._decide_action(target)
 
@@ -260,7 +249,7 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
             headings = (0, np.pi)
             fov = 185  # A little more than 180 to ensure overlap
         else:
-            headings = (self.agent_heading, )
+            headings = (self.agent_heading,)
             fov = self._fov
         for heading in headings:
             self.fog_of_war_mask = reveal_fog_of_war(
@@ -281,6 +270,8 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
                 if min_dist < self._beeline_dist_thresh:
                     self._state = State.BEELINE
                     self._beeline_target = self._episode._shortest_path_cache.points[-1]
+        else:
+            self._coverage_history.append(self._exploration_coverage)
 
         return updated
 
@@ -304,6 +295,7 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         self._agent_heading = None
         self._exploration_successful = False
         self._first_frontier = False
+        self._coverage_history = []
 
         return self._sample_exploration_start()
 
@@ -399,13 +391,22 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         for f_id, f_info in enumerate(self._gt_frontiers):
             frontiers.update(f_info.to_dict(self, f_id, frontier_imgs_dir))
 
+        assert (
+            len(self._coverage_history)
+            == len(self._exploration_poses)
+            == len(self._exploration_imgs)
+        ), (
+            f"{len(self._coverage_history)=} "
+            f"{len(self._exploration_poses)=} "
+            f"{len(self._exploration_imgs)=}"
+        )
         json_data = {
             "episode_id": self._episode.episode_id,
             "scene_id": self._get_scene_id(),
             "exploration_id": int(osp.basename(exploration_imgs_dir).split("_")[-1]),
             "object_category": self._episode.object_category,
             "gt_path_poses": self._gt_path_poses,
-            "exploration_coverage": float(self._exploration_coverage),
+            "coverage_history": self._coverage_history,
             "frontiers": frontiers,
             "timestep_to_frontiers": {
                 fs.time_step: fs.to_dict() for fs in self._frontier_sets
@@ -508,9 +509,7 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
                 self._exploration_successful = (
                     self._min_exploration_steps
                     <= len(self._exploration_poses)
-                    <= self._max_exploration_steps
-                    and abs(self._coverage_goal - self._exploration_coverage)
-                    < EXPLORATION_THRESHOLD
+                    <= self._max_exploration_steps + 1
                 )
 
                 if self._exploration_successful:
@@ -519,8 +518,6 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
                     self._save_to_dataset(episode)
                 else:
                     print("Exploration failed!")
-                    print(f"{self._exploration_coverage=}")
-                    print(f"{len(self._exploration_poses)=}")
                     success = self._reset_exploration()
                     if not success:
                         # Could not find a valid exploration path
@@ -616,6 +613,7 @@ def extract_scene_id(episode: Episode) -> str:
     """
     scene_id = os.path.basename(episode.scene_id).split(".")[0]
     return scene_id
+
 
 def check_mask_overlap(mask_1: np.ndarray, mask_2: np.ndarray) -> float:
     """
