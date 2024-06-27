@@ -49,6 +49,7 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         self._min_exploration_coverage: float = config.min_exploration_coverage
         self._max_exploration_coverage: float = config.max_exploration_coverage
         self._map_measure = task.measurements.measures["top_down_map"]
+        self._unique_episodes_only = config.unique_episodes_only
 
         self._is_exploring: bool = False
 
@@ -104,8 +105,7 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         if self._bad_episode:
             # Create a blank file in the cwd with the episode id and scene id
             print(f"Episode {episode.episode_id} failed!!")
-            scene_id = extract_scene_id(episode)
-            filename = f"{episode.episode_id}_{scene_id}.txt"
+            filename = f"{episode.episode_id}_{self._scene_id}.txt"
             with open(filename, "w") as f:
                 f.write("")
         elif self._step_count > 0:
@@ -304,26 +304,20 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         Saves the frontier information to disk.
         """
         # 'episode_dir' path should be {self._dataset_path}/{scene_id}/{episode_id}
-        scene_id = extract_scene_id(episode)
-        episode_dir = osp.join(
-            self._dataset_path, scene_id, f"episode_{episode.episode_id}"
-        )
-        if not osp.exists(episode_dir):
-            os.makedirs(episode_dir, exist_ok=True)
+        if not osp.exists(self._episode_dir):
+            os.makedirs(self._episode_dir, exist_ok=True)
 
-        frontier_imgs_dir = osp.join(episode_dir, "frontier_imgs")
+        frontier_imgs_dir = osp.join(self._episode_dir, "frontier_imgs")
         self._save_frontier_images(frontier_imgs_dir)
 
-        exploration_id = len(
-            [f for f in os.listdir(episode_dir) if f.startswith("exploration_imgs_")]
-        )
+        exploration_id = len(glob.glob(f"{self._episode_dir}/exploration_imgs_*"))
         exploration_imgs_dir = osp.join(
-            episode_dir, f"exploration_imgs_{exploration_id}"
+            self._episode_dir, f"exploration_imgs_{exploration_id}"
         )
         self._save_exploration_imgs(exploration_imgs_dir)
 
-        episode_json = osp.join(episode_dir, f"exploration_{exploration_id}.json")
-        self._save_episode_json(episode_dir, exploration_imgs_dir, episode_json)
+        episode_json = osp.join(self._episode_dir, f"exploration_{exploration_id}.json")
+        self._save_episode_json(self._episode_dir, exploration_imgs_dir, episode_json)
         self._save_coverage_visualization(exploration_imgs_dir)
 
     def _save_coverage_visualization(self, exploration_imgs_dir: str) -> None:
@@ -402,7 +396,7 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         )
         json_data = {
             "episode_id": self._episode.episode_id,
-            "scene_id": self._get_scene_id(),
+            "scene_id": self._scene_id,
             "exploration_id": int(osp.basename(exploration_imgs_dir).split("_")[-1]),
             "object_category": self._episode.object_category,
             "gt_path_poses": self._gt_path_poses,
@@ -422,7 +416,8 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         with open(episode_json, "w") as f:
             json.dump(json_data, f)
 
-    def _get_scene_id(self) -> str:
+    @property
+    def _scene_id(self) -> str:
         return os.path.basename(self._episode.scene_id).split(".")[0]
 
     @property
@@ -432,9 +427,27 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
             self.fog_of_war_mask,
         )
 
+    @property
+    def _is_unique_episode(self) -> bool:
+        return not osp.exists(self._episode_dir)
+
+    @property
+    def _episode_dir(self) -> str:
+        return osp.join(
+            self._dataset_path, self._scene_id, f"episode_{self._episode.episode_id}"
+        )
+
     def get_observation(
         self, task: EmbodiedTask, episode, *args: Any, **kwargs: Any
     ) -> np.ndarray:
+        if not self._is_exploring:
+            super()._pre_step(episode)
+        else:
+            BaseExplorer._pre_step(self, episode)
+
+        if self._unique_episodes_only and not self._is_unique_episode:
+            task.is_stop_called = True
+            return ActionIDs.STOP
 
         if not self._is_exploring:
             if self._state != State.EXPLORE:
@@ -590,6 +603,7 @@ class ExplorationEpisodeGeneratorConfig(ObjNavExplorerSensorConfig):
     max_exploration_coverage: float = 0.9
     exploration_visibility_dist: float = 5.5
     exploration_area_thresh: float = 4.0
+    unique_episodes_only: bool = True
 
 
 cs = ConfigStore.instance()
@@ -599,20 +613,6 @@ cs.store(
     name="exploration_episode_generator",
     node=ExplorationEpisodeGeneratorConfig,
 )
-
-
-def extract_scene_id(episode: Episode) -> str:
-    """
-    Extracts the scene id from an episode.
-
-    Args:
-        episode (Episode): The episode from which to extract the scene id.
-
-    Returns:
-        str: The scene id extracted from the episode.
-    """
-    scene_id = os.path.basename(episode.scene_id).split(".")[0]
-    return scene_id
 
 
 def check_mask_overlap(mask_1: np.ndarray, mask_2: np.ndarray) -> float:
