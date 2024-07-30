@@ -215,7 +215,7 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
 
         success = False
         start = sample_position_from_same_floor()
-        for _ in range(self._max_exploration_attempts):
+        for attempt in range(self._max_exploration_attempts):
             # Start point must correspond to the same floor as the ground truth path
             sample_map = maps.get_topdown_map_from_sim(
                 self._sim,
@@ -228,7 +228,10 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
                 sampled_rotation = np.array([0, np.sin(rot / 2), 0, np.cos(rot / 2)])
                 self._sim.set_agent_state(position=start, rotation=sampled_rotation)
                 break
-            print("Wrong floor! Resampling...")
+            print(
+                f"Wrong floor! Resampling... "
+                f"{attempt + 1}/{self._max_exploration_attempts}"
+            )
             start = sample_position_from_same_floor()
 
         return success
@@ -299,13 +302,15 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
 
         return self._sample_exploration_start()
 
-    def _save_to_dataset(self, episode: Episode) -> None:
+    def _save_to_dataset(self) -> None:
         """
         Saves the frontier information to disk.
         """
         # 'episode_dir' path should be {self._dataset_path}/{scene_id}/{episode_id}
         if not osp.exists(self._episode_dir):
             os.makedirs(self._episode_dir, exist_ok=True)
+        else:
+            return
 
         frontier_imgs_dir = osp.join(self._episode_dir, "frontier_imgs")
         self._save_frontier_images(frontier_imgs_dir)
@@ -414,6 +419,7 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
             ),
         }
         with open(episode_json, "w") as f:
+            print("Saving episode to:", episode_json)
             json.dump(json_data, f)
 
     @property
@@ -528,7 +534,7 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
                 if self._exploration_successful:
                     print("Exploration successful!")
                     # Save the exploration data to disk
-                    self._save_to_dataset(episode)
+                    self._save_to_dataset()
                 else:
                     print("Exploration failed!")
                     success = self._reset_exploration()
