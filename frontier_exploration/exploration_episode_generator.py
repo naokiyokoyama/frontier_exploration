@@ -423,10 +423,6 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
             json.dump(json_data, f)
 
     @property
-    def _scene_id(self) -> str:
-        return os.path.basename(self._episode.scene_id).split(".")[0]
-
-    @property
     def _exploration_coverage(self):
         return check_mask_overlap(
             self._gt_fog_of_war_mask,

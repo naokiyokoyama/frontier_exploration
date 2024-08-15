@@ -41,7 +41,6 @@ class ObjNavExplorer(BaseExplorer):
         self._beeline_dist_thresh = config.beeline_dist_thresh
         self._success_distance = config.success_distance
 
-        self._episode = None
         self._task = task
         self._state = State.EXPLORE
         self._beeline_target = None
@@ -51,7 +50,6 @@ class ObjNavExplorer(BaseExplorer):
 
     def _reset(self, episode):
         super()._reset(episode)
-        self._episode = episode
         self._state = State.EXPLORE
         self._beeline_target = None
         self._target_yaw = None

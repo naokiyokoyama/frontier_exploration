@@ -1,12 +1,14 @@
 """The following imports are necessary for updating the registry"""
+
 try:
     import frontier_exploration.base_explorer
+    import frontier_exploration.exploration_episode_generator
     import frontier_exploration.frontier_detection
     import frontier_exploration.frontier_sensor
     import frontier_exploration.measurements
     import frontier_exploration.objnav_explorer
-    import frontier_exploration.exploration_episode_generator
     import frontier_exploration.policy
+    import frontier_exploration.st_exploration_episode_generator
     import frontier_exploration.trainer
     import frontier_exploration.utils.inflection_sensor
     import frontier_exploration.utils.multistory_episode_finder

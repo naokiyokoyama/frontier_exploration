@@ -1,3 +1,4 @@
+import os
 import random
 from dataclasses import dataclass
 from typing import Any
@@ -75,7 +76,14 @@ class BaseExplorer(Sensor):
         self._default_dir = None
         self._first_frontier = False  # whether frontiers have been found yet
 
-    def _reset(self, *args, **kwargs):
+        self._episode = None
+
+    @property
+    def _scene_id(self) -> str:
+        return os.path.basename(self._episode.scene_id).split(".")[0]
+
+    def _reset(self, episode):
+        self._episode = episode
         self.top_down_map = maps.get_topdown_map_from_sim(
             self._sim,
             map_resolution=self._map_resolution,
