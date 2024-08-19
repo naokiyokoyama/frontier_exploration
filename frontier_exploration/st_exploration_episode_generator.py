@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import os
@@ -28,6 +29,7 @@ class STEpisodeGenerator(BaseExplorer):
     ) -> None:
         super().__init__(sim, config, *args, **kwargs)
         self._output_dir = config.output_dir
+        self._num_episodes = config.num_episodes
         self._exploration_data = ExplorationData()
 
     @property
@@ -66,11 +68,18 @@ class STEpisodeGenerator(BaseExplorer):
         # - Which scene_id was used (last_ep_scene_id)
         # - Which episode was used (last_ep_id)
         # - The RGB images recorded
-        episode_dir = os.path.join(
-            self._output_dir,
-            self._scene_id,
-            str(self._episode.episode_id),
-        )
+        scene_dir = os.path.join(self._output_dir, self._scene_id)
+        episode_dir = os.path.join(scene_dir, str(self._episode.episode_id))  # noqa
+
+        # Quit if we have already saved self._num_episodes amount of episodes
+        # for the current scene
+        if (
+            len(glob.glob(os.path.join(scene_dir, "*/")))  # noqa
+            >= self.config.num_episodes
+        ):
+            print(f"Already saved {self._num_episodes} episodes for {self._scene_id}")
+            quit()
+
         self._exploration_data.record(str(episode_dir))
         print(f"Saved episode {self._episode.episode_id} in {episode_dir}")
 
@@ -171,6 +180,7 @@ class STEpisodeGeneratorConfig(BaseExplorerSensorConfig):
     visibility_dist: float = 4.5  # in meters
     area_thresh: float = 5.0  # square meters
     minimize_time: bool = True
+    num_episodes: int = 1000
 
 
 cs = ConfigStore.instance()
