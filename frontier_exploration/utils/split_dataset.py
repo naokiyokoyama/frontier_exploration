@@ -75,6 +75,7 @@ def main() -> None:
         raise ValueError("num_files must be a positive integer")
 
     split_pointnav_dataset(args.input_file, args.num_files)
+    print(f"Split dataset into {args.num_files} files!")
 
 
 if __name__ == "__main__":
