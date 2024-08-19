@@ -169,6 +169,7 @@ class STEpisodeGeneratorConfig(BaseExplorerSensorConfig):
     lin_vel: float = 0.5  # meters per second
     turn_angle: float = 30.0  # degrees
     visibility_dist: float = 4.5  # in meters
+    area_thresh: float = 5.0  # square meters
     minimize_time: bool = True
 
 
