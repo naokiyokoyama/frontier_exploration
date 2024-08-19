@@ -73,12 +73,15 @@ class STEpisodeGenerator(BaseExplorer):
 
         # Quit if we have already saved self._num_episodes amount of episodes
         # for the current scene
-        if (
-            len(glob.glob(os.path.join(scene_dir, "*/")))  # noqa
-            >= self.config.num_episodes
-        ):
+        num_done = len(glob.glob(os.path.join(scene_dir, "*/")))  # noqa
+        if num_done >= self.config.num_episodes:
             print(f"Already saved {self._num_episodes} episodes for {self._scene_id}")
             quit()
+        else:
+            print(
+                f"Saved {num_done} of {self._num_episodes} episodes for "
+                f"{self._scene_id}"
+            )
 
         self._exploration_data.record(str(episode_dir))
         print(f"Saved episode {self._episode.episode_id} in {episode_dir}")
