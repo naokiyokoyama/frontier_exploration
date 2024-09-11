@@ -24,6 +24,7 @@ from frontier_exploration.objnav_explorer import (
     State,
 )
 from frontier_exploration.utils.fog_of_war import reveal_fog_of_war
+from frontier_exploration.utils.frontier_filtering import FrontierInfo, filter_frontiers
 from frontier_exploration.utils.general_utils import wrap_heading
 
 EXPLORATION_THRESHOLD = 0.1
@@ -58,10 +59,13 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         self._frontier_id_to_img: dict = {}
         self._exploration_poses: list[list[float]] = []
         self._exploration_imgs: list[np.ndarray] = []
-        self._gt_frontiers: list[FrontierInfo] = []
+        self._exploration_fogs: list[np.ndarray] = []
+        self._gt_frontiers: list[FrontierInfo] = []  # all frontiers seen in the episode
+        self._gt_traj_imgs: list[np.ndarray] = []
         self._seen_frontiers: set[tuple[int, int]] = set()
 
         self._gt_fog_of_war_mask: np.ndarray | None = None
+        self._latest_fog: np.ndarray | None = None
         self._seen_frontier_sets: set = set()
         self._curr_frontier_set: set = set()
         self._frontier_sets: list[FrontierSet] = []
@@ -69,7 +73,6 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         self._exploration_successful: bool = False
         self._start_z: float = -1.0
         self._max_frontiers: int = 0
-        self._coverage_history: list[float] = []
 
         # This will just be used for debugging
         self._bad_episode: bool = False
@@ -85,6 +88,7 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         self._frontier_id_to_img = {}
 
         self._gt_fog_of_war_mask = None
+        self._latest_fog = None
         self._seen_frontier_sets = set()
         self._curr_frontier_set = set()
         self._exploration_poses = []
@@ -94,8 +98,9 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         self._exploration_successful = False
         self._gt_frontiers = []
         self._seen_frontiers = set()
+        self._gt_traj_imgs = []
         self._max_frontiers = 0
-        self._coverage_history = []
+        self._coverage_masks = []
 
         # If the last episode failed, then we need to record the episode's id and its
         # scene id for further debugging
@@ -139,35 +144,52 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         frontier information. Because the amount of new frontier images for one timestep
         can only be 0 or 1, the frontier id is simply set to the timestep.
         """
-        if len(self.frontier_waypoints) == 0:
+        if len(self.frontier_waypoints) == 0 or self._state == State.BEELINE:
             return  # No frontiers to record
+        rgb = self._sim.get_observations_at()["rgb"]
+        self._gt_traj_imgs.append(rgb)
         for f_position in self.frontier_waypoints:
             # For each frontier, convert its position to a tuple to make it hashable
             f_position_tuple: tuple[int, int] = tuple(f_position)  # noqa
-            seen_frontiers = set(f.frontier_position_px for f in self._gt_frontiers)
-            if f_position_tuple not in seen_frontiers:
+            seen_pos_tuples = set(f.position_tuple for f in self._gt_frontiers)
+            if f_position_tuple not in seen_pos_tuples:
                 # Encountered a new frontier
                 frontier_id = len(self._gt_frontiers)
                 self._gt_frontiers.append(
                     FrontierInfo(
                         agent_pose=self._curr_pose,
+                        camera_position_px=self._get_agent_pixel_coords(),
+                        frontier_position=self._pixel_to_map_coors(f_position),
                         frontier_position_px=f_position_tuple,
-                        rgb_img=self._look_at_waypoint(
-                            self._pixel_to_map_coors(f_position)
-                        ),
+                        single_fog_of_war=self._latest_fog,
+                        rgb_img=rgb,
                     )
                 )
                 self._frontier_pose_to_id[f_position_tuple] = frontier_id
 
         # Update the current frontier set by cross-referencing self.frontier_waypoints
         # against self._frontier_pose_to_id
-        self._curr_frontier_set = set(
+        active_ids = [
             self._frontier_pose_to_id[tuple(pose)] for pose in self.frontier_waypoints
+        ]
+        gt_idx = active_ids.index(
+            self._frontier_pose_to_id[tuple(self._correct_frontier_waypoint)]
         )
+        frontier_infos = [self._gt_frontiers[i] for i in active_ids]
+        boundary_contour = cv2.findContours(
+            self.fog_of_war_mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
+        )[0]
+        if len(boundary_contour) == 0:
+            return  # No boundary contour found
+        else:
+            boundary_contour = boundary_contour[0]
+        inds_to_keep = filter_frontiers(frontier_infos, boundary_contour, gt_idx)
+        self._curr_frontier_set = frozenset(active_ids[i] for i in inds_to_keep)
+        pos_set = frozenset(frontier_infos[i].agent_pose_tuple for i in inds_to_keep)
         self._max_frontiers = max(self._max_frontiers, len(self._curr_frontier_set))
-        if self._curr_frontier_set not in self._seen_frontier_sets:
+        if pos_set not in self._seen_frontier_sets:
             # New frontier set found
-            self._seen_frontier_sets.add(tuple(self._curr_frontier_set))
+            self._seen_frontier_sets.add(pos_set)
             self._frontier_sets.append(
                 FrontierSet(
                     frontier_ids=list(self._curr_frontier_set),
@@ -248,21 +270,18 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
 
     def _update_fog_of_war_mask(self):
         orig = self.fog_of_war_mask.copy()
-        if not self._is_exploring:
-            headings = (0, np.pi)
-            fov = 185  # A little more than 180 to ensure overlap
-        else:
-            headings = (self.agent_heading,)
-            fov = self._fov
-        for heading in headings:
-            self.fog_of_war_mask = reveal_fog_of_war(
-                self.top_down_map,
-                self.fog_of_war_mask,
-                self._get_agent_pixel_coords(),
-                heading,
-                fov=fov,
-                max_line_len=self._visibility_dist_in_pixels,
-            )
+        self._latest_fog = reveal_fog_of_war(
+            self.top_down_map,
+            np.zeros_like(self.fog_of_war_mask),
+            self._get_agent_pixel_coords(),
+            self.agent_heading,
+            fov=self._fov,
+            max_line_len=self._visibility_dist_in_pixels,
+        )
+        # Update self.fog_of_war_mask with the new single_mask
+        self.fog_of_war_mask[self._latest_fog == 1] = 1
+        if self._is_exploring:
+            self._exploration_fogs.append(self._latest_fog)
         updated = not np.array_equal(orig, self.fog_of_war_mask)
 
         if not self._is_exploring:
@@ -273,8 +292,6 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
                 if min_dist < self._beeline_dist_thresh:
                     self._state = State.BEELINE
                     self._beeline_target = self._episode._shortest_path_cache.points[-1]
-        else:
-            self._coverage_history.append(self._exploration_coverage)
 
         return updated
 
@@ -293,12 +310,12 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         self.frontier_waypoints = np.array([])
         self._exploration_poses = []
         self._exploration_imgs = []
+        self._exploration_fogs = []
         self.fog_of_war_mask = np.zeros_like(self.top_down_map)
         self._agent_position = None
         self._agent_heading = None
         self._exploration_successful = False
         self._first_frontier = False
-        self._coverage_history = []
 
         return self._sample_exploration_start()
 
@@ -314,16 +331,31 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
 
         frontier_imgs_dir = osp.join(self._episode_dir, "frontier_imgs")
         self._save_frontier_images(frontier_imgs_dir)
+        self._save_rgbs_to_video(
+            self._gt_traj_imgs, osp.join(frontier_imgs_dir, "gt_traj.mp4")
+        )
+        self._save_frontier_fogs(frontier_imgs_dir)
 
         exploration_id = len(glob.glob(f"{self._episode_dir}/exploration_imgs_*"))
         exploration_imgs_dir = osp.join(
             self._episode_dir, f"exploration_imgs_{exploration_id}"
         )
-        self._save_exploration_imgs(exploration_imgs_dir)
+        self._save_rgbs_to_video(
+            self._exploration_imgs, osp.join(exploration_imgs_dir, "exploration.mp4")
+        )
+        self._save_exploration_fogs(exploration_imgs_dir)
 
         episode_json = osp.join(self._episode_dir, f"exploration_{exploration_id}.json")
         self._save_episode_json(self._episode_dir, exploration_imgs_dir, episode_json)
-        self._save_coverage_visualization(exploration_imgs_dir)
+        # self._save_coverage_visualization(exploration_imgs_dir)
+        if "NUM_EXP_EPISODES" in os.environ:
+            num_episodes = int(os.environ["NUM_EXP_EPISODES"])
+            if (
+                len(glob.glob(f"{self._dataset_path}/{self._scene_id}/*"))
+                >= num_episodes
+            ):
+                print("Reached the desired number of episodes. Stopping...")
+                quit()
 
     def _save_coverage_visualization(self, exploration_imgs_dir: str) -> None:
         # Save visualization of the coverage
@@ -351,26 +383,48 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         if not osp.exists(frontier_imgs_dir):
             os.makedirs(frontier_imgs_dir, exist_ok=True)
         for frontier_id, f_info in enumerate(self._gt_frontiers):
+            # Only save the frontier if it is a member of at least one FrontierSet
+            # that has at least 2 frontiers
+            necessary = False
+            for frontier_set in self._frontier_sets:
+                if frontier_id in frontier_set.frontier_ids and len(frontier_set) > 1:
+                    necessary = True
+                    break
+
+            if not necessary:
+                continue
+
             img_filename = osp.join(
                 frontier_imgs_dir, f"frontier_{frontier_id:04d}.jpg"
             )
             img_bgr = cv2.cvtColor(f_info.rgb_img, cv2.COLOR_RGB2BGR)
             cv2.imwrite(img_filename, img_bgr)
 
-    def _save_exploration_imgs(self, exploration_imgs_dir: str) -> None:
-        """
-        Saves the exploration images to disk.
+    @staticmethod
+    def _save_rgbs_to_video(rgbs: list[np.ndarray], output_path: str) -> None:
+        parent_dir = osp.dirname(output_path)
+        if not osp.exists(parent_dir):
+            os.makedirs(parent_dir, exist_ok=True)
+        bgr = [cv2.cvtColor(i, cv2.COLOR_RGB2BGR) for i in rgbs]
+        images_to_video(bgr, output_path)
 
-        Args:
-            exploration_imgs_dir (str): The path to the directory to save the
-                exploration images.
-        """
-        if not osp.exists(exploration_imgs_dir):
-            os.makedirs(exploration_imgs_dir, exist_ok=True)
-        for i, img in enumerate(self._exploration_imgs):
-            img_filename = osp.join(exploration_imgs_dir, f"exploration_{i:04d}.jpg")
-            img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(img_filename, img_bgr)
+    def _save_exploration_fogs(self, dir_path: str) -> None:
+        self._save_fogs(self._exploration_fogs, dir_path, "exploration")
+
+    def _save_frontier_fogs(self, dir_path: str) -> None:
+        self._save_fogs(
+            [f.single_fog_of_war for f in self._gt_frontiers], dir_path, "frontiers"
+        )
+
+    @staticmethod
+    def _save_fogs(fogs, dir_path: str, prefix: str) -> None:
+        fog_stack = np.stack(fogs)
+        orig_shape = fog_stack.shape
+        assert len(orig_shape) == 3
+        shape_str = "_".join(str(i) for i in orig_shape)
+        packed = np.packbits(fog_stack)
+        filepath = osp.join(dir_path, f"{prefix}_{shape_str}.npy")
+        np.save(filepath, packed)
 
     def _save_episode_json(
         self, frontier_imgs_dir: str, exploration_imgs_dir: str, episode_json: str
@@ -388,16 +442,10 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         """
         frontiers = {}
         for f_id, f_info in enumerate(self._gt_frontiers):
-            frontiers.update(f_info.to_dict(self, f_id, frontier_imgs_dir))
+            frontiers.update(f_info.to_dict(f_id, frontier_imgs_dir))
 
-        assert (
-            len(self._coverage_history)
-            == len(self._exploration_poses)
-            == len(self._exploration_imgs)
-        ), (
-            f"{len(self._coverage_history)=} "
-            f"{len(self._exploration_poses)=} "
-            f"{len(self._exploration_imgs)=}"
+        assert len(self._exploration_poses) == len(self._exploration_imgs), (
+            f"{len(self._exploration_poses)=} " f"{len(self._exploration_imgs)=}"
         )
         json_data = {
             "episode_id": self._episode.episode_id,
@@ -405,7 +453,6 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
             "exploration_id": int(osp.basename(exploration_imgs_dir).split("_")[-1]),
             "object_category": self._episode.object_category,
             "gt_path_poses": self._gt_path_poses,
-            "coverage_history": self._coverage_history,
             "frontiers": frontiers,
             "timestep_to_frontiers": {
                 fs.time_step: fs.to_dict() for fs in self._frontier_sets
@@ -435,8 +482,12 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
 
     @property
     def _episode_dir(self) -> str:
-        return osp.join(
-            self._dataset_path, self._scene_id, f"episode_{self._episode.episode_id}"
+        return str(
+            osp.join(
+                self._dataset_path,
+                self._scene_id,
+                f"episode_{self._episode.episode_id}",
+            )
         )
 
     def get_observation(
@@ -491,7 +542,7 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
             if feasible:
                 self._bad_episode = not stop_called
             else:
-                self._bad_episode = False
+                self._bad_episode = False  # infeasible, but not feasible + unsuccessful
                 task.is_stop_called = True
                 return ActionIDs.STOP
 
@@ -546,46 +597,37 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         return action
 
 
-class FrontierInfo:
-    def __init__(
-        self,
-        agent_pose: list[float],
-        frontier_position_px: tuple[int, int],
-        rgb_img: np.ndarray,
-    ):
-        self.agent_pose = agent_pose
-        self.frontier_position_px = frontier_position_px
-        self.rgb_img = rgb_img
+def images_to_video(image_list, output_path, fps=5):
+    # Get the height and width from the first image
+    height, width = image_list[0].shape[:2]
+    print(f"Creating video with dimensions {width}x{height} at {fps} FPS")
 
-    def to_dict(
-        self,
-        explorer_ep_gen: ExplorationEpisodeGenerator,
-        frontier_id: int,
-        frontier_imgs_dir: str,
-    ):
-        return {
-            frontier_id: {
-                "agent_pose": self.agent_pose,
-                "frontier_position_px": list(self.frontier_position_px),
-                "frontier_position": explorer_ep_gen._pixel_to_map_coors(  # noqa
-                    np.array(self.frontier_position_px)
-                ).tolist(),
-                "frontier_img_path": osp.join(
-                    frontier_imgs_dir, f"frontier_{frontier_id:04d}.jpg"
-                ),
-            }
-        }
+    # Define the codec and create VideoWriter object
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+
+    # Write each image to the video
+    for image in image_list:
+        out.write(image)
+
+    # Release the VideoWriter
+    out.release()
+
+    print(f"Video saved to {output_path}")
 
 
 class FrontierSet:
     def __init__(self, frontier_ids: list[int], best_id: int, time_step: int):
-        self._frontier_ids = frontier_ids
         self._best_id = best_id
+        self.frontier_ids = frontier_ids
         self.time_step = time_step
+
+    def __len__(self):
+        return len(self.frontier_ids)
 
     def to_dict(self):
         return {
-            "frontier_ids": self._frontier_ids,
+            "frontier_ids": self.frontier_ids,
             "best_id": self._best_id,
         }
 
@@ -595,7 +637,7 @@ class ExplorationEpisodeGeneratorConfig(ObjNavExplorerSensorConfig):
     type: str = ExplorationEpisodeGenerator.__name__
     turn_angle: float = 30.0  # degrees
     forward_step_size: float = 0.5  # meters
-    beeline_dist_thresh: float = 8  # meters
+    beeline_dist_thresh: float = 2  # meters
     success_distance: float = 0.1  # meters
     dataset_path: str = "data/exploration_episodes/"
     max_exploration_attempts: int = 100

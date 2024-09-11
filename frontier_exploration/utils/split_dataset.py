@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 
-def split_pointnav_dataset(input_file: str, num_files: int) -> None:
+def split_dataset(input_file: str, num_files: int, objectnav: bool = False) -> None:
     """
     Split a PointNav dataset into multiple files.
 
@@ -23,7 +23,11 @@ def split_pointnav_dataset(input_file: str, num_files: int) -> None:
         None
     """
     # Create necessary directories
-    base_dir = Path("data/datasets/pointnav/hm3d/v1/val")
+    if objectnav:
+        task = "objectnav"
+    else:
+        task = "pointnav"
+    base_dir = Path(f"data/datasets/{task}/hm3d/v1/val")
     content_dir = base_dir / "content"
     base_dir.mkdir(parents=True, exist_ok=True)
     content_dir.mkdir(parents=True, exist_ok=True)
@@ -41,6 +45,12 @@ def split_pointnav_dataset(input_file: str, num_files: int) -> None:
     total_episodes = len(episodes)
     episodes_per_file = total_episodes // num_files
     remainder = total_episodes % num_files
+
+    # For any .json.gz files that may already be in content_dir, rename them
+    # so that their extension is now .json.gz.old
+    for file in content_dir.iterdir():
+        if file.suffix == ".json.gz":
+            file.rename(file.with_suffix(".json.gz.old"))
 
     # Split and save datasets
     start = 0
@@ -60,21 +70,27 @@ def split_pointnav_dataset(input_file: str, num_files: int) -> None:
 
 def main() -> None:
     """
-    Main function to parse arguments and call the split_pointnav_dataset function.
+    Main function to parse arguments and call the split_dataset function.
     """
     parser = argparse.ArgumentParser(
-        description="Split PointNav dataset into multiple files."
+        description="Split .json.gz dataset into multiple files."
     )
     parser.add_argument("input_file", type=str, help="Path to the input json.gz file")
     parser.add_argument(
         "num_files", type=int, help="Number of files to split the dataset into"
+    )
+    parser.add_argument(
+        "-o",
+        "--objectnav",
+        action="store_true",
+        help="Use ObjectNav dataset instead of PointNav",
     )
     args = parser.parse_args()
 
     if args.num_files <= 0:
         raise ValueError("num_files must be a positive integer")
 
-    split_pointnav_dataset(args.input_file, args.num_files)
+    split_dataset(args.input_file, args.num_files, args.objectnav)
     print(f"Split dataset into {args.num_files} files!")
 
 
