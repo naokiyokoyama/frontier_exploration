@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 
-def split_dataset(input_file: str, num_files: int, objectnav: bool = False) -> None:
+def split_dataset(input_file: str, num_files: int, split: str, objectnav: bool = False) -> None:
     """
     Split a PointNav dataset into multiple files.
 
@@ -27,21 +27,25 @@ def split_dataset(input_file: str, num_files: int, objectnav: bool = False) -> N
         task = "objectnav"
     else:
         task = "pointnav"
-    base_dir = Path(f"data/datasets/{task}/hm3d/v1/val")
+    base_dir = Path(f"data/datasets/{task}/hm3d/v1/{split}")
     content_dir = base_dir / "content"
     base_dir.mkdir(parents=True, exist_ok=True)
     content_dir.mkdir(parents=True, exist_ok=True)
 
     # Create empty dataset file
-    empty_dataset_path = base_dir / "val.json.gz"
-    with gzip.open(empty_dataset_path, "wt") as f:
-        json.dump({"episodes": []}, f)
+    empty_dataset_path = base_dir / f"{split}.json.gz"
+    assert empty_dataset_path.exists()
 
     # Load input dataset
     with gzip.open(input_file, "rt") as f:
         data = json.load(f)
 
     episodes = data["episodes"]
+    if task == "objectnav":
+        # Load the other keys to copy over later
+        remainder_dict = {key: data[key] for key in data.keys() if key != "episodes"}
+    else:
+        remainder_dict = {}
     total_episodes = len(episodes)
     episodes_per_file = total_episodes // num_files
     remainder = total_episodes % num_files
@@ -63,7 +67,7 @@ def split_dataset(input_file: str, num_files: int, objectnav: bool = False) -> N
         output_path = content_dir / output_filename
 
         with gzip.open(output_path, "wt") as f:
-            json.dump({"episodes": subset}, f)
+            json.dump({"episodes": subset, **remainder_dict}, f)
 
         start = end
 
@@ -76,6 +80,7 @@ def main() -> None:
         description="Split .json.gz dataset into multiple files."
     )
     parser.add_argument("input_file", type=str, help="Path to the input json.gz file")
+    parser.add_argument("split", type=str, help="Which split to use")
     parser.add_argument(
         "num_files", type=int, help="Number of files to split the dataset into"
     )
@@ -90,7 +95,7 @@ def main() -> None:
     if args.num_files <= 0:
         raise ValueError("num_files must be a positive integer")
 
-    split_dataset(args.input_file, args.num_files, args.objectnav)
+    split_dataset(args.input_file, args.num_files, args.split, args.objectnav)
     print(f"Split dataset into {args.num_files} files!")
 
 
