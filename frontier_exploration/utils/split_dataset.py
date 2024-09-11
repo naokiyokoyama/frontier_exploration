@@ -49,8 +49,8 @@ def split_dataset(input_file: str, num_files: int, objectnav: bool = False) -> N
     # For any .json.gz files that may already be in content_dir, rename them
     # so that their extension is now .json.gz.old
     for file in content_dir.iterdir():
-        if file.suffix == ".json.gz":
-            file.rename(file.with_suffix(".json.gz.old"))
+        if file.suffix == ".gz":
+            file.rename(file.with_suffix(".gz.old"))
 
     # Split and save datasets
     start = 0
