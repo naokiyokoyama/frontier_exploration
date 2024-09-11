@@ -30,6 +30,20 @@ from frontier_exploration.utils.general_utils import wrap_heading
 EXPLORATION_THRESHOLD = 0.1
 
 
+def default_on_exception(default_value):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                print(f"Exception occurred: {e}")
+                return default_value
+
+        return wrapper
+
+    return decorator
+
+
 @registry.register_sensor
 class ExplorationEpisodeGenerator(ObjNavExplorer):
     cls_uuid: str = "exploration_episode_generator"
@@ -350,10 +364,11 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         # self._save_coverage_visualization(exploration_imgs_dir)
         if "NUM_EXP_EPISODES" in os.environ:
             num_episodes = int(os.environ["NUM_EXP_EPISODES"])
-            if (
-                len(glob.glob(f"{self._dataset_path}/{self._scene_id}/*"))
-                >= num_episodes
-            ):
+            curr_num_episodes = len(
+                glob.glob(f"{self._dataset_path}/{self._scene_id}/*")
+            )
+            print(f"Finished {curr_num_episodes} of {num_episodes} episodes")
+            if curr_num_episodes >= num_episodes:
                 print("Reached the desired number of episodes. Stopping...")
                 quit()
 
@@ -490,6 +505,7 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
             )
         )
 
+    @default_on_exception(default_value=ActionIDs.STOP)
     def get_observation(
         self, task: EmbodiedTask, episode, *args: Any, **kwargs: Any
     ) -> np.ndarray:
