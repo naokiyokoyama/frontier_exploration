@@ -96,22 +96,21 @@ def filter_frontiers(
             inds_to_keep.append(idx)
         else:
             # Remove all overlapping_indices from the two lists; best will be re-added
-            overlapping_frontiers = []
-            overlapping_inds_to_keep = []
+            overlapping_frontiers = [fd]
+            overlapping_inds_to_keep = [idx]
             for i in overlapping_indices[::-1]:
                 overlapping_frontiers.append(filtered_frontiers.pop(i))
                 overlapping_inds_to_keep.append(inds_to_keep.pop(i))
 
-            overlapping_frontiers.append(fd)
-
-            if idx == gt_idx:
-                # The current frontier is the ground truth; cannot be removed
-                best_idx = len(overlapping_frontiers) - 1
+            if gt_idx in overlapping_inds_to_keep:
+                # The ground truth is one of the overlapping ones; keep it
+                best_idx = overlapping_inds_to_keep.index(gt_idx)
             else:
                 # Compare boundary angles and keep the best one
                 best_idx = identify_best_frontier(
                     overlapping_frontiers, boundary_contour
                 )
+
             if best_idx == len(overlapping_frontiers) - 1:
                 # The current frontier is the best one; add it
                 filtered_frontiers.append(fd)
@@ -171,6 +170,7 @@ def get_boundary_angle(
 
     return angle
 
+
 @njit
 def min_angle_between_lines(line1, line2):
     # Ensure inputs are correct shape
@@ -185,8 +185,8 @@ def min_angle_between_lines(line1, line2):
     dot_product = vec1[0] * vec2[0] + vec1[1] * vec2[1]
 
     # Calculate magnitudes
-    mag1 = np.sqrt(vec1[0]**2 + vec1[1]**2)
-    mag2 = np.sqrt(vec2[0]**2 + vec2[1]**2)
+    mag1 = np.sqrt(vec1[0] ** 2 + vec1[1] ** 2)
+    mag2 = np.sqrt(vec2[0] ** 2 + vec2[1] ** 2)
 
     # Check for zero-length vectors
     if mag1 == 0 or mag2 == 0:

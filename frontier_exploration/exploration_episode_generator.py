@@ -634,6 +634,7 @@ def images_to_video(image_list, output_path, fps=5):
 
 class FrontierSet:
     def __init__(self, frontier_ids: list[int], best_id: int, time_step: int):
+        assert best_id in frontier_ids
         self._best_id = best_id
         self.frontier_ids = frontier_ids
         self.time_step = time_step
@@ -656,7 +657,7 @@ class ExplorationEpisodeGeneratorConfig(ObjNavExplorerSensorConfig):
     beeline_dist_thresh: float = 2  # meters
     success_distance: float = 0.1  # meters
     dataset_path: str = "data/exploration_episodes/"
-    max_exploration_attempts: int = 100
+    max_exploration_attempts: int = 10
     min_exploration_steps: int = 20
     max_exploration_steps: int = 100
     min_exploration_coverage: float = 0.1
