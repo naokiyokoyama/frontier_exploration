@@ -96,15 +96,24 @@ def filter_frontiers(
             inds_to_keep.append(idx)
         else:
             # Remove all overlapping_indices from the two lists; best will be re-added
-            overlapping_frontiers = [fd]
-            overlapping_inds_to_keep = [idx]
+            overlapping_frontiers = []
+            overlapping_inds_to_keep = []
             for i in overlapping_indices[::-1]:
                 overlapping_frontiers.append(filtered_frontiers.pop(i))
                 overlapping_inds_to_keep.append(inds_to_keep.pop(i))
 
-            if gt_idx in overlapping_inds_to_keep:
+            overlapping_frontiers.append(fd)
+
+            if idx == gt_idx:
+                # The current frontier is the ground truth; cannot be removed
+                best_idx = len(overlapping_frontiers) - 1
+            elif gt_idx in overlapping_inds_to_keep:
                 # The ground truth is one of the overlapping ones; keep it
-                best_idx = overlapping_inds_to_keep.index(gt_idx)
+                filtered_frontiers.append(
+                    overlapping_frontiers[overlapping_inds_to_keep.index(gt_idx)]
+                )
+                inds_to_keep.append(gt_idx)
+                continue
             else:
                 # Compare boundary angles and keep the best one
                 best_idx = identify_best_frontier(
