@@ -25,7 +25,7 @@ from frontier_exploration.objnav_explorer import (
 )
 from frontier_exploration.utils.fog_of_war import reveal_fog_of_war
 from frontier_exploration.utils.frontier_filtering import FrontierInfo, filter_frontiers
-from frontier_exploration.utils.general_utils import wrap_heading
+from frontier_exploration.utils.general_utils import images_to_video, wrap_heading
 
 EXPLORATION_THRESHOLD = 0.1
 
@@ -143,14 +143,6 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
             self._exploration_poses.append(curr_pose)
         else:
             self._gt_path_poses.append(curr_pose)
-
-    @property
-    def _curr_pose(self) -> list[float]:
-        quat = self._sim.get_agent_state().rotation
-        yaw = 2 * np.arctan2(quat.y, quat.w)
-        curr_pose = [*self._sim.get_agent_state().position, yaw]
-        curr_pose = [float(f) for f in curr_pose]
-        return curr_pose
 
     def _record_frontiers(self) -> None:
         """
@@ -611,25 +603,6 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
             task.is_stop_called = True
 
         return action
-
-
-def images_to_video(image_list, output_path, fps=5):
-    # Get the height and width from the first image
-    height, width = image_list[0].shape[:2]
-    print(f"Creating video with dimensions {width}x{height} at {fps} FPS")
-
-    # Define the codec and create VideoWriter object
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-
-    # Write each image to the video
-    for image in image_list:
-        out.write(image)
-
-    # Release the VideoWriter
-    out.release()
-
-    print(f"Video saved to {output_path}")
 
 
 class FrontierSet:

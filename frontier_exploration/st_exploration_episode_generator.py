@@ -18,6 +18,7 @@ from frontier_exploration.base_explorer import (
     BaseExplorer,
     BaseExplorerSensorConfig,
 )
+from frontier_exploration.utils.general_utils import images_to_video
 
 
 @registry.register_sensor
@@ -93,7 +94,7 @@ class STEpisodeGenerator(BaseExplorer):
         action = super().get_observation(task, episode, *args, **kwargs)
         self._exploration_data.append(
             kwargs["observations"]["rgb"],
-            self.agent_position,
+            self._curr_pose,
             self._get_agent_pixel_coords(),
         )
         return action
@@ -116,9 +117,9 @@ class ExplorationData:
         self._ep_scene_id = ep_scene_id
         self._map_filename = map_filename
 
-    def append(self, rgb_image: np.ndarray, pose: np.ndarray, pose_pixel: np.ndarray):
+    def append(self, rgb_image: np.ndarray, pose: list[float], pose_pixel: np.ndarray):
         self._rgb_images.append(rgb_image)
-        self._trajectory.append(pose.tolist())
+        self._trajectory.append(pose)
         self._trajectory_pixels.append(pose_pixel.tolist())
 
     def record(self, episode_directory: str):
@@ -147,11 +148,9 @@ class ExplorationData:
                 f,
             )
 
-        # Save images to the same directory
-        for idx, img in enumerate(self._rgb_images):
-            img_path = os.path.join(episode_directory, f"{idx:04d}.jpg")
-            bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(img_path, bgr)
+        # Save images as video for better compression
+        video_path = os.path.join(episode_directory, "video.mp4")
+        images_to_video(self._rgb_images, video_path)
 
 
 def save_map(np_arr, filepath: str) -> None:
@@ -161,6 +160,7 @@ def save_map(np_arr, filepath: str) -> None:
 
 
 def hash_2d_binary_array(arr):
+    arr_shape = arr.shape
     # Flatten the array and convert to bytes
     flat_bytes = arr.flatten().tobytes()
 
@@ -168,8 +168,8 @@ def hash_2d_binary_array(arr):
     hash_obj = hashlib.sha256()
     hash_obj.update(flat_bytes)
 
-    # Return the hexadecimal representation of the hash
-    return hash_obj.hexdigest()
+    # Return the hexadecimal representation of the hash and the shape of the array
+    return f"{hash_obj.hexdigest()}_{'_'.join(map(str, arr_shape))}"
 
 
 @dataclass

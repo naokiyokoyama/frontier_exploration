@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 from numba import njit
 
@@ -31,3 +32,22 @@ def habitat_to_xyz(coords: np.ndarray) -> np.ndarray:
 @handle_single_point
 def xyz_to_habitat(coords: np.ndarray) -> np.ndarray:
     return np.array([-coords[:, 1], coords[:, 2], -coords[:, 0]]).T
+
+
+def images_to_video(image_list, output_path, fps=5):
+    # Get the height and width from the first image
+    height, width = image_list[0].shape[:2]
+    print(f"Creating video with dimensions {width}x{height} at {fps} FPS")
+
+    # Define the codec and create VideoWriter object
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+
+    # Write each image to the video
+    for image in image_list:
+        out.write(image)
+
+    # Release the VideoWriter
+    out.release()
+
+    print(f"Video saved to {output_path}")

@@ -113,6 +113,14 @@ class BaseExplorer(Sensor):
         return spaces.Box(low=0, high=255, shape=(1,), dtype=np.uint8)
 
     @property
+    def _curr_pose(self) -> list[float]:
+        quat = self._sim.get_agent_state().rotation
+        yaw = 2 * np.arctan2(quat.y, quat.w)
+        curr_pose = [*self._sim.get_agent_state().position, yaw]
+        curr_pose = [float(f) for f in curr_pose]
+        return curr_pose
+
+    @property
     def agent_position(self):
         if self._agent_position is None:
             self._agent_position = self._sim.get_agent_state().position
