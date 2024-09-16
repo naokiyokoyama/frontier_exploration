@@ -71,12 +71,14 @@ class FrontierExplorationMap(TopDownMap):
 
         try:
             super().reset_metric(episode, *args, **kwargs)
-        except IndexError:
+        except IndexError as e:
             # For some reason sometimes the agent is out of bounds at this point...
-            self._sim.set_agent_state(
-                episode.start_position, episode.start_rotation
-            )
-            super().reset_metric(episode, *args, **kwargs)
+            # save the name of the scene so that we can avoid using it anymore
+            basename = os.path.basename(episode.scene_id)
+            basename_no_ext = basename.split(".")[0]
+            with open(f"{basename_no_ext}.txt", "a") as f:
+                f.write("")
+            raise e
         self._draw_target_bbox_mask(episode)
 
         # Expose sufficient info for drawing 3D points on the map
