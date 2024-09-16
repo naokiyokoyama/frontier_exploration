@@ -90,7 +90,6 @@ class STEpisodeGenerator(BaseExplorer):
     def get_observation(
         self, task: EmbodiedTask, episode, *args: Any, **kwargs: Any
     ) -> np.ndarray:
-        self._pre_step(episode)
         action = super().get_observation(task, episode, *args, **kwargs)
         self._exploration_data.append(
             kwargs["observations"]["rgb"],

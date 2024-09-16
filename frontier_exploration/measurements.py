@@ -68,7 +68,15 @@ class FrontierExplorationMap(TopDownMap):
         assert "task" in kwargs, "task must be passed to reset_metric!"
         self._explorer_sensor = kwargs["task"].sensor_suite.sensors[self._explorer_uuid]
         self._static_metrics = {}
-        super().reset_metric(episode, *args, **kwargs)
+
+        try:
+            super().reset_metric(episode, *args, **kwargs)
+        except IndexError:
+            # For some reason sometimes the agent is out of bounds at this point...
+            self._sim.set_agent_state(
+                episode.start_position, episode.start_rotation
+            )
+            super().reset_metric(episode, *args, **kwargs)
         self._draw_target_bbox_mask(episode)
 
         # Expose sufficient info for drawing 3D points on the map
