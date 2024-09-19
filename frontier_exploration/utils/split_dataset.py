@@ -1,32 +1,34 @@
 import argparse
 import gzip
 import json
+import random
 from pathlib import Path
 
 
-def split_dataset(input_file: str, num_files: int, split: str, objectnav: bool = False) -> None:
+def split_dataset(
+    input_file: str, num_files: int, split: str, objectnav: bool = False
+) -> None:
     """
-    Split a PointNav dataset into multiple files.
+    Split a PointNav or ObjectNav dataset into multiple files with balanced episode counts.
 
     This function performs the following tasks:
     1. Creates necessary directories
     2. Creates an empty dataset file
     3. Loads the input dataset
-    4. Splits the dataset into specified number of files
+    4. Splits the dataset into specified number of files, ensuring equal episode counts
     5. Saves the split datasets
 
     Args:
         input_file (str): Path to the input json.gz file
         num_files (int): Number of files to split the dataset into
+        split (str): Which split to use
+        objectnav (bool): Use ObjectNav dataset instead of PointNav
 
     Returns:
         None
     """
     # Create necessary directories
-    if objectnav:
-        task = "objectnav"
-    else:
-        task = "pointnav"
+    task = "objectnav" if objectnav else "pointnav"
     base_dir = Path(f"data/datasets/{task}/hm3d/v1/{split}")
     content_dir = base_dir / "content"
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -41,26 +43,31 @@ def split_dataset(input_file: str, num_files: int, split: str, objectnav: bool =
         data = json.load(f)
 
     episodes = data["episodes"]
-    if task == "objectnav":
-        # Load the other keys to copy over later
-        remainder_dict = {key: data[key] for key in data.keys() if key != "episodes"}
-    else:
-        remainder_dict = {}
+    remainder_dict = (
+        {key: data[key] for key in data.keys() if key != "episodes"}
+        if task == "objectnav"
+        else {}
+    )
     total_episodes = len(episodes)
-    episodes_per_file = total_episodes // num_files
-    remainder = total_episodes % num_files
+    episodes_per_file = (total_episodes + num_files - 1) // num_files  # Round up
 
     # For any .json.gz files that may already be in content_dir, rename them
-    # so that their extension is now .json.gz.old
     for file in content_dir.iterdir():
         if file.suffix == ".gz":
             file.rename(file.with_suffix(".gz.old"))
 
     # Split and save datasets
-    start = 0
+    random.shuffle(episodes)  # Shuffle episodes to ensure random distribution
     for i in range(num_files):
-        end = start + episodes_per_file + (1 if i < remainder else 0)
+        start = i * episodes_per_file
+        end = min((i + 1) * episodes_per_file, total_episodes)
         subset = episodes[start:end]
+
+        # If this is the last file and it's short on episodes, add random episodes
+        if i == num_files - 1 and len(subset) < episodes_per_file:
+            additional_needed = episodes_per_file - len(subset)
+            additional_episodes = random.sample(episodes[:start], additional_needed)
+            subset.extend(additional_episodes)
 
         stem = Path(input_file).stem[: -len(".json")]
         output_filename = f"{stem}_{i}.json.gz"
@@ -69,7 +76,9 @@ def split_dataset(input_file: str, num_files: int, split: str, objectnav: bool =
         with gzip.open(output_path, "wt") as f:
             json.dump({"episodes": subset, **remainder_dict}, f)
 
-        start = end
+    print(
+        f"Split dataset into {num_files} files, each containing {episodes_per_file} episodes."
+    )
 
 
 def main() -> None:
@@ -77,7 +86,7 @@ def main() -> None:
     Main function to parse arguments and call the split_dataset function.
     """
     parser = argparse.ArgumentParser(
-        description="Split .json.gz dataset into multiple files."
+        description="Split .json.gz dataset into multiple files with balanced episode counts."
     )
     parser.add_argument("input_file", type=str, help="Path to the input json.gz file")
     parser.add_argument("split", type=str, help="Which split to use")
@@ -96,7 +105,6 @@ def main() -> None:
         raise ValueError("num_files must be a positive integer")
 
     split_dataset(args.input_file, args.num_files, args.split, args.objectnav)
-    print(f"Split dataset into {args.num_files} files!")
 
 
 if __name__ == "__main__":
