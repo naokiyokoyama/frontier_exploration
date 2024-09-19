@@ -632,7 +632,7 @@ class ExplorationEpisodeGeneratorConfig(ObjNavExplorerSensorConfig):
     dataset_path: str = "data/exploration_episodes/"
     max_exploration_attempts: int = 10
     min_exploration_steps: int = 20
-    max_exploration_steps: int = 100
+    max_exploration_steps: int = 2000
     min_exploration_coverage: float = 0.1
     max_exploration_coverage: float = 0.9
     exploration_visibility_dist: float = 5.5
