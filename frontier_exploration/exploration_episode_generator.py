@@ -13,7 +13,6 @@ import quaternion as qt
 from habitat import EmbodiedTask, registry
 from habitat.core.dataset import Episode
 from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
-from habitat.utils.visualizations import maps
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig
 
@@ -28,6 +27,7 @@ from frontier_exploration.target_explorer import (
 from frontier_exploration.utils.fog_of_war import reveal_fog_of_war
 from frontier_exploration.utils.frontier_filtering import FrontierInfo, filter_frontiers
 from frontier_exploration.utils.general_utils import images_to_video, wrap_heading
+from frontier_exploration.utils.path_utils import get_path
 
 EXPLORATION_THRESHOLD = 0.1
 
@@ -108,6 +108,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         self._area_thresh = self._config.area_thresh
 
         self._is_exploring = False
+        self._minimize_time = False
         self._frontier_pose_to_id = {}
         self._frontier_id_to_img = {}
 
@@ -316,6 +317,15 @@ class ExplorationEpisodeGenerator(TargetExplorer):
                 self._sim.set_agent_state(
                     position=sampled_position, rotation=[0.0, 0.0, 0.0, 1.0]
                 )
+
+                path = get_path(
+                    self._episode.start_position,
+                    self._sim.get_agent_state().position,
+                    self._sim,
+                )
+                if path is None:
+                    continue
+
                 if abs(self._sim.get_agent_state().position[1] - self._start_z) < 0.5:
                     return sampled_position
             raise RuntimeError("Failed to sample a valid point")
@@ -323,22 +333,16 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         success = False
         start = sample_position_from_same_floor()
         for attempt in range(self._max_exploration_attempts):
-            # Start point must correspond to the same floor as the ground truth path
-            sample_map = maps.get_topdown_map_from_sim(
-                self._sim,
-                map_resolution=self._map_resolution,
-                draw_border=False,
-            )
-            if np.array_equal(sample_map, self.top_down_map):
+            path = get_path(self._episode.start_position, start, self._sim)
+            z_values = [i[1] for i in path.points]
+            if np.ptp(z_values) < 0.5:
                 success = True
-                rot = np.random.rand() * 2 * np.pi
-                sampled_rotation = np.array([0, np.sin(rot / 2), 0, np.cos(rot / 2)])
-                self._sim.set_agent_state(position=start, rotation=sampled_rotation)
                 break
             print(
-                f"Wrong floor! Resampling... "
+                f"Floor traversal detected! Resampling... "
                 f"{attempt + 1}/{self._max_exploration_attempts}"
             )
+
             start = sample_position_from_same_floor()
 
         return success
@@ -417,6 +421,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         self._agent_heading = None
         self._exploration_successful = False
         self._first_frontier = False
+        self._minimize_time = True
 
         return self._sample_exploration_start()
 
@@ -793,7 +798,6 @@ class FrontierSet:
 @dataclass
 class ExplorationEpisodeGeneratorConfig(TargetExplorerSensorConfig):
     type: str = ExplorationEpisodeGenerator.__name__
-    minimize_time: bool = False
     turn_angle: float = 30.0  # degrees
     forward_step_size: float = 0.5  # meters
     exploration_visibility_dist: float = 4.5  # meters
@@ -801,7 +805,7 @@ class ExplorationEpisodeGeneratorConfig(TargetExplorerSensorConfig):
     beeline_dist_thresh: float = 2.25  # meters; > visibility_dist required
     success_distance: float = 0.5  # meters
     dataset_path: str = "data/exploration_episodes/"
-    max_exploration_attempts: int = 10
+    max_exploration_attempts: int = 100
     min_exploration_steps: int = 20
     max_exploration_steps: int = 2000
     min_exploration_coverage: float = 0.1
