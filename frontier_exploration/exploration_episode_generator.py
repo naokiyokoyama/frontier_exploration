@@ -532,7 +532,8 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
     def _save_imagenav_goal(self, frontier_imgs_dir: str) -> None:
         filepath = osp.join(frontier_imgs_dir, "goal.jpg")
-        cv2.imwrite(filepath, self._imagenav_goal)
+        bgr = cv2.cvtColor(self._imagenav_goal, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(filepath, bgr)
 
     def _save_episode_json(
         self, frontier_imgs_dir: str, exploration_imgs_dir: str, episode_json: str
