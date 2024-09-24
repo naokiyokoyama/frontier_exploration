@@ -795,8 +795,9 @@ class ExplorationEpisodeGeneratorConfig(TargetExplorerSensorConfig):
     minimize_time: bool = False
     turn_angle: float = 30.0  # degrees
     forward_step_size: float = 0.5  # meters
-    exploration_visibility_dist: float = 2.15  # meters
-    beeline_dist_thresh: float = 2.25  # meters; > exploration_visibility_dist required
+    exploration_visibility_dist: float = 4.5  # meters
+    visibility_dist: float = 2.15  # meters
+    beeline_dist_thresh: float = 2.25  # meters; > visibility_dist required
     success_distance: float = 0.5  # meters
     dataset_path: str = "data/exploration_episodes/"
     max_exploration_attempts: int = 10
@@ -808,6 +809,7 @@ class ExplorationEpisodeGeneratorConfig(TargetExplorerSensorConfig):
     unique_episodes_only: bool = True
     task_type: str = "objectnav"
     stop_at_beelining: bool = True
+    no_flip_flopping: bool = True
 
 
 cs = ConfigStore.instance()

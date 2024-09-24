@@ -1,10 +1,13 @@
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
-from habitat import registry
+from habitat import EmbodiedTask, registry
+from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
 from habitat.tasks.nav.object_nav_task import ObjectGoal, ObjectViewLocation
 from habitat_sim import AgentState
 from hydra.core.config_store import ConfigStore
+from omegaconf import DictConfig
 
 from frontier_exploration.base_explorer import (
     ActionIDs,
@@ -20,6 +23,21 @@ from frontier_exploration.utils.general_utils import wrap_heading
 @registry.register_sensor
 class ObjNavExplorer(TargetExplorer):
     cls_uuid: str = "objnav_explorer"
+
+    def __init__(
+        self,
+        sim: HabitatSim,
+        config: "DictConfig",
+        task: EmbodiedTask,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(sim, config, *args, **kwargs)
+        self._target_yaw: float = np.nan
+
+    def _reset(self, episode):
+        super()._reset(episode)
+        self._target_yaw = np.nan
 
     def _setup_pivot(self):
         closest_point = self.identify_closest_viewpoint()

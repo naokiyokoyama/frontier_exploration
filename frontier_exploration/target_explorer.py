@@ -3,6 +3,7 @@ from typing import Any
 
 import numpy as np
 from habitat import EmbodiedTask
+from habitat.core.embodied_task import Measure
 from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
 from habitat.tasks.nav.nav import DistanceToGoal
 from omegaconf import DictConfig
@@ -31,29 +32,31 @@ class TargetExplorer(BaseExplorer):
         **kwargs: Any,
     ) -> None:
         super().__init__(sim, config, *args, **kwargs)
-        self._beeline_dist_thresh = config.beeline_dist_thresh
-        self._success_distance = config.success_distance
+        self._beeline_dist_thresh: float = config.beeline_dist_thresh
+        self._success_distance: float = config.success_distance
 
-        self._task = task
-        self._state = State.EXPLORE
-        self._beeline_target = None
-        self._target_yaw = None
-        self._goal_dist_measure = task.measurements.measures[DistanceToGoal.cls_uuid]
-        self._step_count = 0
+        self._task: EmbodiedTask = task
+        self._state: int = State.EXPLORE
+        self._beeline_target: np.ndarray = np.full(3, np.nan)
+        self._goal_dist_measure: Measure = task.measurements.measures[
+            DistanceToGoal.cls_uuid
+        ]
+        self._step_count: int = 0
+        self._should_update_closest_frontier: bool = True
+        self._previous_closest_frontier: np.ndarray = np.full(3, np.nan)
 
     def _reset(self, episode):
         super()._reset(episode)
         self._state = State.EXPLORE
-        self._beeline_target = None
-        self._target_yaw = None
+        self._beeline_target = np.full(3, np.nan)
         self._goal_dist_measure.reset_metric(episode, task=self._task)
         self._step_count = 0
 
     @property
-    def beeline_target_pixels(self):
+    def beeline_target_pixels(self) -> np.ndarray:
         # This property is used by the FrontierExplorationMap measurement
-        if self._beeline_target is None:
-            return None
+        if np.any(np.isnan(self._beeline_target)):
+            return np.full(2, np.nan)
         return self._map_coors_to_pixel(self._beeline_target)
 
     def _pre_step(self, episode):
@@ -155,10 +158,39 @@ class TargetExplorer(BaseExplorer):
 
         return updated
 
+    def _update_frontiers(self):
+        # There is a small chance that the closest frontier has been filtered out
+        # due to self._area_thresh_in_pixels, so we need to run it twice (w/ and w/o
+        # filtering) to ensure that the closest frontier is not filtered out.
+        orig_frontiers = self.frontier_waypoints.copy()
+        orig_thresh = self._area_thresh_in_pixels
+        orig_fog = self.fog_of_war_mask.copy()
+
+        self._area_thresh_in_pixels = 0
+        super()._update_frontiers()
+        self._area_thresh_in_pixels = orig_thresh
+
+        if not self._should_update_closest_frontier:
+            self.frontier_waypoints = orig_frontiers
+            return
+
+        target_frontier = GreedyExplorerMixin._get_closest_waypoint(self)
+
+        self.fog_of_war_mask = orig_fog
+        super()._update_frontiers()
+
+        if not np.any(np.all(self.frontier_waypoints == target_frontier, axis=1)):
+            self.frontier_waypoints = np.vstack(
+                [target_frontier, self.frontier_waypoints]
+            )
+
 
 class GreedyExplorerMixin:
 
     def _get_closest_waypoint(self: TargetExplorer):
+        if not self._should_update_closest_frontier:
+            return self._curr_closest_frontier
+
         if len(self.frontier_waypoints) == 0:
             return None
         # Identify the closest target object

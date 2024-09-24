@@ -60,6 +60,7 @@ class BaseExplorer(Sensor):
         self._success_distance = config.success_distance
         self._turn_angle = np.deg2rad(config.turn_angle)
         self._visibility_dist = config.visibility_dist
+        self._no_flip_flopping = config.no_flip_flopping
 
         # Public attributes are used by the FrontierExplorationMap measurement
         self.closest_frontier_waypoint = None
@@ -78,6 +79,8 @@ class BaseExplorer(Sensor):
         self._next_waypoint = None
         self._default_dir = None
         self._first_frontier = False  # whether frontiers have been found yet
+        self._should_update_closest_frontier: bool = True
+        self._curr_closest_frontier: np.ndarray = np.full(3, np.nan)
 
         self._episode = None
 
@@ -105,6 +108,8 @@ class BaseExplorer(Sensor):
         self._first_frontier = False
         self.inflection = False
         self._prev_action = None
+        self._should_update_closest_frontier = True
+        self._curr_closest_frontier = np.full(3, np.nan)
 
     def _get_uuid(self, *args: Any, **kwargs: Any) -> str:
         return self.cls_uuid
@@ -178,6 +183,7 @@ class BaseExplorer(Sensor):
 
     def _update_frontiers(self):
         updated = self._update_fog_of_war_mask()
+        self._should_update_closest_frontier = updated or not self._no_flip_flopping
         if updated:
             self.frontier_waypoints = detect_frontier_waypoints(
                 self.top_down_map,
@@ -197,6 +203,9 @@ class BaseExplorer(Sensor):
         return next_waypoint
 
     def _get_closest_waypoint(self):
+        if not self._should_update_closest_frontier:
+            return self._curr_closest_frontier
+
         if len(self.frontier_waypoints) == 0:
             return None
         sim_waypoints = self._pixel_to_map_coors(self.frontier_waypoints)
@@ -204,7 +213,8 @@ class BaseExplorer(Sensor):
         if idx is None:
             return None
 
-        return self.frontier_waypoints[idx]
+        self._curr_closest_frontier = self.frontier_waypoints[idx]
+        return self._curr_closest_frontier
 
     def _astar_search(self, sim_waypoints, start_position=None):
         if start_position is None:
@@ -363,6 +373,7 @@ class BaseExplorerSensorConfig(LabSensorConfig):
     success_distance: float = 0.18  # meters
     turn_angle: float = 10.0  # degrees
     visibility_dist: float = 4.5  # in meters
+    no_flip_flopping: bool = False
 
 
 cs = ConfigStore.instance()

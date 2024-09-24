@@ -141,9 +141,11 @@ class FrontierExplorationMap(TopDownMap):
             except OverflowError:
                 pass
 
-        beeline_target = getattr(self._explorer_sensor, "beeline_target_pixels", None)
-        if beeline_target is not None:
+        if hasattr(self._explorer_sensor, "beeline_target_pixels") and not np.any(
+            np.isnan(self._explorer_sensor.beeline_target_pixels)
+        ):
             try:
+                beeline_target = self._explorer_sensor.beeline_target_pixels
                 cv2.circle(
                     new_map,
                     tuple(beeline_target[::-1].astype(np.int32)),

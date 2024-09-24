@@ -17,7 +17,7 @@ def detect_frontier_waypoints(
     explored_mask: np.ndarray,
     area_thresh: Optional[int] = -1,
     xy: Optional[np.ndarray] = None,
-):
+) -> np.ndarray:
     if DEBUG:
         import time
 
