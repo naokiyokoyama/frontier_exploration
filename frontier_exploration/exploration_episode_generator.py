@@ -674,7 +674,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
                 else:
                     self._bad_episode = False
                     task.is_stop_called = True
-                    print("STOP: Failed to find a suitable yaw for the goal image.")
+                    print("STOP: Episode is infeasible; floor traversal required.")
                     return ActionIDs.STOP
             else:
                 feasible = True
