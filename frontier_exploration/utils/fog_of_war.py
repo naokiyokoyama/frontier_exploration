@@ -77,7 +77,15 @@ def reveal_fog_of_war(
     )
 
     # Create a mask of pixels that are both in the cone and NOT in the top_down_map
-    obstacles_in_cone = cv2.bitwise_and(cone_mask, 1 - top_down_map)
+    # (i.e., 1 = obstacle inside fov cone, 0 = otherwise)
+    obstacles_in_cone = np.logical_and(cone_mask == 1, top_down_map == 0).astype(
+        np.uint8
+    )
+
+    if np.count_nonzero(obstacles_in_cone) == 0:
+        new_fog_of_war_mask = current_fog_of_war_mask.copy()
+        new_fog_of_war_mask[cone_mask == 1] = 1
+        return new_fog_of_war_mask
 
     # Find the contours of the obstacles in the cone
     obstacle_contours, _ = cv2.findContours(
@@ -106,9 +114,6 @@ def reveal_fog_of_war(
         cv2.imshow("vis_obstacles_mask", vis_obstacles_mask)
         cv2.waitKey(0)
         cv2.destroyWindow("vis_obstacles_mask")
-
-    if len(obstacle_contours) == 0:
-        return current_fog_of_war_mask  # there were no obstacles in the cone
 
     # Find the two points in each contour that form the smallest and largest angles
     # from the current position
