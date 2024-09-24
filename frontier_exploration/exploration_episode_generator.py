@@ -9,6 +9,7 @@ from typing import Any
 
 import cv2
 import numpy as np
+import quaternion as qt
 from habitat import EmbodiedTask, registry
 from habitat.core.dataset import Episode
 from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
@@ -16,12 +17,13 @@ from habitat.utils.visualizations import maps
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig
 
-from frontier_exploration.base_explorer import ActionIDs, BaseExplorer
-from frontier_exploration.objnav_explorer import (
-    GreedyObjNavExplorer,
-    ObjNavExplorer,
-    ObjNavExplorerSensorConfig,
+from frontier_exploration.base_explorer import ActionIDs, BaseExplorer, get_polar_angle
+from frontier_exploration.objnav_explorer import ObjNavExplorer
+from frontier_exploration.target_explorer import (
+    GreedyExplorerMixin,
     State,
+    TargetExplorer,
+    TargetExplorerSensorConfig,
 )
 from frontier_exploration.utils.fog_of_war import reveal_fog_of_war
 from frontier_exploration.utils.frontier_filtering import FrontierInfo, filter_frontiers
@@ -45,7 +47,7 @@ def default_on_exception(default_value):
 
 
 @registry.register_sensor
-class ExplorationEpisodeGenerator(ObjNavExplorer):
+class ExplorationEpisodeGenerator(TargetExplorer):
     cls_uuid: str = "exploration_episode_generator"
 
     def __init__(
@@ -65,6 +67,9 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         self._max_exploration_coverage: float = config.max_exploration_coverage
         self._map_measure = task.measurements.measures["top_down_map"]
         self._unique_episodes_only = config.unique_episodes_only
+        self._task_type = config.task_type
+        self._stop_at_beelining: bool = config.stop_at_beelining
+        assert config.task_type in ["objectnav", "imagenav"]
 
         self._is_exploring: bool = False
 
@@ -78,8 +83,8 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         self._gt_traj_imgs: list[np.ndarray] = []
         self._seen_frontiers: set[tuple[int, int]] = set()
 
-        self._gt_fog_of_war_mask: np.ndarray | None = None
-        self._latest_fog: np.ndarray | None = None
+        self._gt_fog_of_war_mask: np.ndarray = np.empty((1, 1))  # 2D array
+        self._latest_fog: np.ndarray = np.empty((1, 1))  # 2D array
         self._seen_frontier_sets: set = set()
         self._curr_frontier_set: set = set()
         self._frontier_sets: list[FrontierSet] = []
@@ -88,8 +93,13 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         self._start_z: float = -1.0
         self._max_frontiers: int = 0
 
+        # For ImageNav
+        self._imagenav_goal: np.ndarray = np.empty((1, 1))  # 2D array
+        self._total_fov_pixels: int = 0
+
         # This will just be used for debugging
         self._bad_episode: bool = False
+        self._viz_imgs: list[np.ndarray] = []
 
     def _reset(self, episode: Episode) -> None:
         super()._reset(episode)
@@ -115,6 +125,18 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         self._gt_traj_imgs = []
         self._max_frontiers = 0
         self._coverage_masks = []
+
+        if self._viz_imgs:
+            import time
+
+            print("Writing visualization images to video...")
+            output_path = f"{int(time.time())}.mp4"
+            images_to_video(self._viz_imgs, output_path, fps=5)
+        self._viz_imgs = []
+
+        if self._task_type == "imagenav":
+            self._total_fov_pixels = 0
+            self._imagenav_goal = self._generate_imagenav_goal(episode)
 
         # If the last episode failed, then we need to record the episode's id and its
         # scene id for further debugging
@@ -208,10 +230,67 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
 
     @property
     def _correct_frontier_waypoint(self) -> np.ndarray:
-        return GreedyObjNavExplorer._get_closest_waypoint(self)
+        return GreedyExplorerMixin._get_closest_waypoint(self)
+
+    def _generate_imagenav_goal(self, episode: Episode) -> np.ndarray:
+        """
+        Generates an image taken at the goal point for ImageNav tasks. The yaw of the
+        agent when the image is taken is selected such that at least 50% of the agent's
+        FOV is unobstructed. This is to avoid image goals that are too close to walls.
+
+        Args:
+            episode (Episode): The current episode.
+
+        Returns:
+            np.ndarray: The RGB image of the goal.
+        """
+        if self._total_fov_pixels == 0:
+            height, width = self.top_down_map.shape
+            single_fov = reveal_fog_of_war(
+                np.ones_like(self.top_down_map),  # fully navigable map
+                np.zeros_like(self.fog_of_war_mask),  # no explored areas
+                current_point=np.array((height // 2, width // 2)),
+                current_angle=0.0,
+                fov=self._fov,
+                max_line_len=self._visibility_dist_in_pixels,
+            )
+
+            self._total_fov_pixels = np.count_nonzero(single_fov)
+
+        assert len(episode.goals) == 1, "Only one goal is supported for ImageNav tasks"
+        goal_position = self._map_coors_to_pixel(episode.goals[0].position)
+        for _ in range(50):
+            rand_angle = np.random.uniform(0, 2 * np.pi)
+            goal_rotation = qt.quaternion(
+                np.cos(rand_angle / 2), 0, np.sin(rand_angle / 2), 0
+            )
+            yaw = get_polar_angle(goal_rotation)
+
+            curr_fov = reveal_fog_of_war(
+                self.top_down_map,
+                np.zeros_like(self.fog_of_war_mask),  # no explored areas
+                current_point=goal_position,
+                current_angle=yaw,
+                fov=self._fov,
+                max_line_len=self._visibility_dist_in_pixels,
+            )
+            current_fov_pixels = np.count_nonzero(curr_fov)
+            unobstructed_percentage = current_fov_pixels / self._total_fov_pixels
+
+            if unobstructed_percentage > 0.2:
+                image_goal = self._sim.get_observations_at(
+                    position=episode.goals[0].position,
+                    rotation=goal_rotation,
+                    keep_agent_at_new_pose=False,
+                )["rgb"]
+                return image_goal
+
+        # We have failed to find a suitable yaw. Return a NaN array.
+        return np.array([np.nan])
 
     def _look_at_waypoint(self, waypoint: np.ndarray) -> np.ndarray:
         """
+        (Currently unused)
         Returns the RGB image of the agent looking at a waypoint.
         """
         x_diff = waypoint[0] - self.agent_position[0]
@@ -301,6 +380,22 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
 
         return updated
 
+    def _setup_pivot(self):
+        if self._task_type == "objectnav":
+            return ObjNavExplorer._setup_pivot(self)
+        elif self._task_type == "imagenav":
+            pass  # no need to pivot for ImageNav
+        else:
+            raise NotImplementedError
+
+    def _pivot(self):
+        if self._task_type == "objectnav":
+            return ObjNavExplorer._pivot(self)
+        elif self._task_type == "imagenav":
+            return ActionIDs.STOP
+        else:
+            raise NotImplementedError
+
     def _reset_exploration(self) -> bool:
         """
         Resets the exploration process by sampling a new starting pose and updating the
@@ -341,6 +436,8 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
             self._gt_traj_imgs, osp.join(frontier_imgs_dir, "gt_traj.mp4")
         )
         self._save_frontier_fogs(frontier_imgs_dir)
+        if self._task_type == "imagenav":
+            self._save_imagenav_goal(frontier_imgs_dir)
 
         exploration_id = len(glob.glob(f"{self._episode_dir}/exploration_imgs_*"))
         exploration_imgs_dir = osp.join(
@@ -433,6 +530,10 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         filepath = osp.join(dir_path, f"{prefix}_{shape_str}.npy")
         np.save(filepath, packed)
 
+    def _save_imagenav_goal(self, frontier_imgs_dir: str) -> None:
+        filepath = osp.join(frontier_imgs_dir, "goal.jpg")
+        cv2.imwrite(filepath, self._imagenav_goal)
+
     def _save_episode_json(
         self, frontier_imgs_dir: str, exploration_imgs_dir: str, episode_json: str
     ) -> None:
@@ -458,20 +559,17 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
             "episode_id": self._episode.episode_id,
             "scene_id": self._scene_id,
             "exploration_id": int(osp.basename(exploration_imgs_dir).split("_")[-1]),
-            "object_category": self._episode.object_category,
             "gt_path_poses": self._gt_path_poses,
             "frontiers": frontiers,
             "timestep_to_frontiers": {
                 fs.time_step: fs.to_dict() for fs in self._frontier_sets
             },
             "exploration_poses": self._exploration_poses,
-            "exploration_imgs": sorted(
-                [
-                    osp.join(exploration_imgs_dir, f)
-                    for f in glob.glob(f"{exploration_imgs_dir}/*.jpg")
-                ]
-            ),
         }
+
+        if self._task_type == "objectnav":
+            json_data["object_category"] = self._episode.object_category
+
         with open(episode_json, "w") as f:
             print("Saving episode to:", episode_json)
             json.dump(json_data, f)
@@ -506,21 +604,33 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         else:
             BaseExplorer._pre_step(self, episode)
 
-        if self._unique_episodes_only and not self._is_unique_episode:
+        # self._visualize_map()
+
+        if self._state == State.CANCEL or (
+            self._unique_episodes_only and not self._is_unique_episode
+        ):
+            print(
+                "STOP: One of these is true: "
+                f"{self._state == State.CANCEL = }, "
+                f"{self._unique_episodes_only and not self._is_unique_episode = }"
+            )
             task.is_stop_called = True
             return ActionIDs.STOP
 
         if not self._is_exploring:
-            if self._state != State.EXPLORE:
-                # These functions are only called when self._state == State.EXPLORE, but
-                # for this class, we want to call it every step
-                self._update_frontiers()
-                self.closest_frontier_waypoint = self._get_closest_waypoint()
-            print(
-                f"GT path: {len(self._gt_path_poses)} "
-                f"# frontiers: {len(self._curr_frontier_set)} "
-            )
-            action = super().get_observation(task, episode, *args, **kwargs)
+            if self._stop_at_beelining and self._state == State.BEELINE:
+                action = ActionIDs.STOP
+            else:
+                if self._state != State.EXPLORE:
+                    # These functions are only called when self._state == State.EXPLORE,
+                    # but for this class, we want to call it every step
+                    self._update_frontiers()
+                    self.closest_frontier_waypoint = self._get_closest_waypoint()
+                print(
+                    f"GT path: {len(self._gt_path_poses)} "
+                    f"# frontiers: {len(self._curr_frontier_set)} "
+                )
+                action = super().get_observation(task, episode, *args, **kwargs)
         else:
             # BaseExplorer already calls _update_frontiers() and get_closest_waypoint()
             # at every step no matter what, so we don't need to call them here
@@ -545,14 +655,23 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
         # updated, we have to make sure that self._step_count is > 1
         if self._step_count == 1:
             self._bad_episode = False
-        elif not self._is_exploring:  # Can stop checking once we start exploring
-            feasible = self._map_measure.get_metric()["is_feasible"]
-            if feasible:
-                self._bad_episode = not stop_called
-            else:
-                self._bad_episode = False  # infeasible, but not feasible + unsuccessful
+            if self._task_type == "imagenav" and np.isnan(self._imagenav_goal).all():
+                # Failed to find a suitable yaw for the goal image
+                print("STOP: Failed to find a suitable yaw for the goal image.")
                 task.is_stop_called = True
                 return ActionIDs.STOP
+        elif not self._is_exploring:  # Can stop checking once we start exploring
+            if self._task_type == "objectnav":
+                feasible = self._map_measure.get_metric()["is_feasible"]
+                if feasible:
+                    self._bad_episode = not stop_called
+                else:
+                    self._bad_episode = False
+                    task.is_stop_called = True
+                    print("STOP: Failed to find a suitable yaw for the goal image.")
+                    return ActionIDs.STOP
+            else:
+                feasible = True
 
             if feasible and stop_called:
                 # Ground truth path completed; move on to exploration phase
@@ -604,6 +723,54 @@ class ExplorationEpisodeGenerator(ObjNavExplorer):
 
         return action
 
+    def _visualize_map(self):
+        if self._step_count <= 1:
+            return
+
+        top_down_map_vis = self.top_down_map.astype(np.uint8) * 255
+        top_down_map_vis[self.fog_of_war_mask == 1] = 128
+        top_down_map_vis = cv2.cvtColor(top_down_map_vis, cv2.COLOR_GRAY2BGR)
+
+        # Draw the goal point as a filled red circle of size 4
+        goal_px = self._map_coors_to_pixel(self._episode.goals[0].position)[::-1]
+        cv2.circle(top_down_map_vis, tuple(goal_px), 4, (0, 0, 255), -1)
+
+        # Draw the current agent position as a filled green circle of size 4
+        agent_px = self._get_agent_pixel_coords()[::-1]
+        cv2.circle(top_down_map_vis, tuple(agent_px), 4, (0, 255, 0), -1)
+
+        # Draw the beeline radius circle (not filled) in blue, convert meters to pixels
+        beeline_radius = self._convert_meters_to_pixel(self._beeline_dist_thresh)
+        cv2.circle(top_down_map_vis, tuple(goal_px), beeline_radius, (255, 0, 0), 1)
+
+        # Draw the success radius circle in green
+        success_radius = self._convert_meters_to_pixel(self._config.success_distance)
+        cv2.circle(top_down_map_vis, tuple(goal_px), success_radius, (0, 255, 0), 1)
+
+        # For each frontier waypoint, draw an unfilled circle in orange
+        for waypoint in self.frontier_waypoints:
+            cv2.circle(
+                top_down_map_vis, waypoint[::-1].astype(np.int32), 2, (0, 165, 255), 1
+            )
+
+        rgb = self._sim.get_observations_at()["rgb"]
+
+        if self._task_type == "imagenav":
+            rgb = np.hstack([rgb, self._imagenav_goal])
+
+        rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        map_height = top_down_map_vis.shape[0]
+        scaled_width = int(rgb.shape[1] * map_height / rgb.shape[0])
+        rgb_resized = cv2.resize(rgb, (scaled_width, map_height))
+        img = np.hstack([rgb_resized, top_down_map_vis])
+        img = add_text_to_image(
+            img,
+            f"# frontiers: {len(self._curr_frontier_set)}  "
+            f"Step: {self._step_count}",
+            font_size=1,
+        )
+        self._viz_imgs.append(img)
+
 
 class FrontierSet:
     def __init__(self, frontier_ids: list[int], best_id: int, time_step: int):
@@ -623,21 +790,24 @@ class FrontierSet:
 
 
 @dataclass
-class ExplorationEpisodeGeneratorConfig(ObjNavExplorerSensorConfig):
+class ExplorationEpisodeGeneratorConfig(TargetExplorerSensorConfig):
     type: str = ExplorationEpisodeGenerator.__name__
+    minimize_time: bool = False
     turn_angle: float = 30.0  # degrees
     forward_step_size: float = 0.5  # meters
-    beeline_dist_thresh: float = 2  # meters
-    success_distance: float = 0.1  # meters
+    exploration_visibility_dist: float = 2.15  # meters
+    beeline_dist_thresh: float = 2.25  # meters; > exploration_visibility_dist required
+    success_distance: float = 0.5  # meters
     dataset_path: str = "data/exploration_episodes/"
     max_exploration_attempts: int = 10
     min_exploration_steps: int = 20
     max_exploration_steps: int = 2000
     min_exploration_coverage: float = 0.1
     max_exploration_coverage: float = 0.9
-    exploration_visibility_dist: float = 5.5
     exploration_area_thresh: float = 4.0
     unique_episodes_only: bool = True
+    task_type: str = "objectnav"
+    stop_at_beelining: bool = True
 
 
 cs = ConfigStore.instance()
@@ -677,11 +847,9 @@ def check_mask_overlap(mask_1: np.ndarray, mask_2: np.ndarray) -> float:
     return overlap_percentage
 
 
-def add_text_to_image(image, text):
+def add_text_to_image(image, text, font_size=3):
     # Get image dimensions
     height, width = image.shape[:2]
-
-    font_size = 3
 
     # Set font
     font = cv2.FONT_HERSHEY_SIMPLEX
