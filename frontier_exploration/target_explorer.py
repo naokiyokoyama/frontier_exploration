@@ -57,7 +57,13 @@ class TargetExplorer(BaseExplorer):
         # This property is used by the FrontierExplorationMap measurement
         if np.any(np.isnan(self._beeline_target)):
             return np.full(2, np.nan)
-        return self._map_coors_to_pixel(self._beeline_target)
+        px_coor = self._map_coors_to_pixel(self._beeline_target)
+        a_x, a_y = px_coor
+        if a_x < 0 or a_y < 0:
+            return np.full(2, np.nan)
+        if a_x >= self.top_down_map.shape[0] or a_y >= self.top_down_map.shape[1]:
+            return np.full(2, np.nan)
+        return px_coor
 
     def _pre_step(self, episode):
         super()._pre_step(episode)
