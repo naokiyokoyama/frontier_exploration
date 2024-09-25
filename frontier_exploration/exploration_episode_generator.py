@@ -384,6 +384,15 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         return updated
 
+    def _update_frontiers(self):
+        if not self._is_exploring:
+            # Avoids filtering out frontiers in front of the goal
+            super()._update_frontiers()
+        else:
+            # Avoids the actual goal for the episode affecting behavior
+            BaseExplorer._update_frontiers(self)
+
+
     def _setup_pivot(self):
         if self._task_type == "objectnav":
             return ObjNavExplorer._setup_pivot(self)
@@ -729,7 +738,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         return action
 
-    def _visualize_map(self):
+    def _visualize_map(self, exploration: bool = False):
         if self._step_count <= 1:
             return
 
@@ -737,21 +746,24 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         top_down_map_vis[self.fog_of_war_mask == 1] = 128
         top_down_map_vis = cv2.cvtColor(top_down_map_vis, cv2.COLOR_GRAY2BGR)
 
-        # Draw the goal point as a filled red circle of size 4
-        goal_px = self._map_coors_to_pixel(self._episode.goals[0].position)[::-1]
-        cv2.circle(top_down_map_vis, tuple(goal_px), 4, (0, 0, 255), -1)
-
         # Draw the current agent position as a filled green circle of size 4
         agent_px = self._get_agent_pixel_coords()[::-1]
         cv2.circle(top_down_map_vis, tuple(agent_px), 4, (0, 255, 0), -1)
 
-        # Draw the beeline radius circle (not filled) in blue, convert meters to pixels
-        beeline_radius = self._convert_meters_to_pixel(self._beeline_dist_thresh)
-        cv2.circle(top_down_map_vis, tuple(goal_px), beeline_radius, (255, 0, 0), 1)
+        if not exploration:
+            # Draw the goal point as a filled red circle of size 4
+            goal_px = self._map_coors_to_pixel(self._episode.goals[0].position)[::-1]
+            cv2.circle(top_down_map_vis, tuple(goal_px), 4, (0, 0, 255), -1)
 
-        # Draw the success radius circle in green
-        success_radius = self._convert_meters_to_pixel(self._config.success_distance)
-        cv2.circle(top_down_map_vis, tuple(goal_px), success_radius, (0, 255, 0), 1)
+            # Draw the beeline radius circle (not filled) in blue, convert meters to pixels
+            beeline_radius = self._convert_meters_to_pixel(self._beeline_dist_thresh)
+            cv2.circle(top_down_map_vis, tuple(goal_px), beeline_radius, (255, 0, 0), 1)
+
+            # Draw the success radius circle in green
+            success_radius = self._convert_meters_to_pixel(
+                self._config.success_distance
+            )
+            cv2.circle(top_down_map_vis, tuple(goal_px), success_radius, (0, 255, 0), 1)
 
         # For each frontier waypoint, draw an unfilled circle in orange
         for waypoint in self.frontier_waypoints:

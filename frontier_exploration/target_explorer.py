@@ -45,7 +45,7 @@ class TargetExplorer(BaseExplorer):
         self._should_update_closest_frontier: bool = True
         self._previous_closest_frontier: np.ndarray = np.full(3, np.nan)
 
-    def _reset(self, episode):
+    def _reset(self, episode) -> None:
         super()._reset(episode)
         self._state = State.EXPLORE
         self._beeline_target = np.full(3, np.nan)
@@ -65,7 +65,7 @@ class TargetExplorer(BaseExplorer):
             return np.full(2, np.nan)
         return px_coor
 
-    def _pre_step(self, episode):
+    def _pre_step(self, episode) -> None:
         super()._pre_step(episode)
         if self._episode._shortest_path_cache is None:
             self._goal_dist_measure.reset_metric(episode, task=self._task)
@@ -128,10 +128,10 @@ class TargetExplorer(BaseExplorer):
 
         return action
 
-    def _setup_pivot(self):
+    def _setup_pivot(self) -> None:
         raise NotImplementedError
 
-    def _pivot(self):
+    def _pivot(self) -> None:
         raise NotImplementedError
 
     def _get_min_dist(self):
@@ -145,7 +145,7 @@ class TargetExplorer(BaseExplorer):
             return float("inf")
         return dist
 
-    def _update_fog_of_war_mask(self):
+    def _update_fog_of_war_mask(self) -> None:
         updated = (
             super()._update_fog_of_war_mask() if self._state == State.EXPLORE else False
         )
@@ -164,7 +164,7 @@ class TargetExplorer(BaseExplorer):
 
         return updated
 
-    def _update_frontiers(self):
+    def _update_frontiers(self) -> None:
         # There is a small chance that the closest frontier has been filtered out
         # due to self._area_thresh_in_pixels, so we need to run it twice (w/ and w/o
         # filtering) to ensure that the closest frontier is not filtered out.
