@@ -71,14 +71,24 @@ class FrontierExplorationMap(TopDownMap):
 
         try:
             super().reset_metric(episode, *args, **kwargs)
-        except IndexError as e:
+        except IndexError:
             # For some reason sometimes the agent is out of bounds at this point...
-            # save the name of the scene so that we can avoid using it anymore
-            basename = os.path.basename(episode.scene_id)
-            basename_no_ext = basename.split(".")[0]
-            with open(f"{basename_no_ext}.txt", "a") as f:
-                f.write("")
-            raise e
+
+            # Modify the agent's state to a valid value
+            position = self._sim.pathfinder.get_random_navigable_point()
+            rotation = [0.0, 0.0, 0.0, 1.0]
+            self._sim.set_agent_state(position, rotation)
+
+            # Retry the super().reset_metric
+            super().reset_metric(episode, *args, **kwargs)
+
+            # End the episode
+            kwargs["task"].is_stop_called = True
+
+            print("Agent was out of bounds at the start of episode:")
+            print(f"Episode ID: {episode.episode_id}")
+            print(f"Scene ID: {episode.scene_id}")
+
         self._draw_target_bbox_mask(episode)
 
         # Expose sufficient info for drawing 3D points on the map
