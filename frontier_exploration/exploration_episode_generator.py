@@ -130,8 +130,9 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         if self._viz_imgs:
             import time
 
-            print("Writing visualization images to video...")
-            output_path = f"{int(time.time())}.mp4"
+            output_path = f"{int(time.time())}_{self._task_type}.mp4"
+            print(f"Writing visualization images to video at {output_path}...")
+            self._viz_imgs = pad_images_to_max_height(self._viz_imgs)
             images_to_video(self._viz_imgs, output_path, fps=5)
         self._viz_imgs = []
 
@@ -392,7 +393,6 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             # Avoids the actual goal for the episode affecting behavior
             BaseExplorer._update_frontiers(self)
 
-
     def _setup_pivot(self):
         if self._task_type == "objectnav":
             return ObjNavExplorer._setup_pivot(self)
@@ -627,8 +627,6 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         else:
             BaseExplorer._pre_step(self, episode)
 
-        # self._visualize_map()
-
         if self._state == State.CANCEL or (
             self._unique_episodes_only and not self._is_unique_episode
         ):
@@ -666,6 +664,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         if not self._is_exploring:
             self._record_frontiers()
+            self._visualize_map()
         else:
             if len(self._exploration_poses) == 1:
                 rgb = self._sim.get_observations_at()["rgb"]
@@ -783,9 +782,14 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         if self._task_type == "imagenav":
             rgb = np.hstack([rgb, self._imagenav_goal])
+        else:
+            goal = np.ones_like(rgb) * 255
+            goal = add_text_to_image(goal, self._episode.object_category, font_size=1)
+            goal = goal[: rgb.shape[0], :]
+            rgb = np.hstack([rgb, goal])
 
         rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        map_height = top_down_map_vis.shape[0]
+        map_height, map_width = top_down_map_vis.shape[:2]
         scaled_width = int(rgb.shape[1] * map_height / rgb.shape[0])
         rgb_resized = cv2.resize(rgb, (scaled_width, map_height))
         img = np.hstack([rgb_resized, top_down_map_vis])
@@ -795,7 +799,98 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             f"Step: {self._step_count}",
             font_size=1,
         )
+
+        # Stack the frontiers towards the bottom
+        curr_frontier_ids = list(self._curr_frontier_set)
+        if curr_frontier_ids:
+            curr_frontier_imgs = [
+                self._gt_frontiers[i].rgb_img for i in curr_frontier_ids
+            ]
+            curr_frontier_imgs = [
+                cv2.cvtColor(i, cv2.COLOR_RGB2BGR) for i in curr_frontier_imgs
+            ]
+            num_frontier_width = minimize_difference(map_width, scaled_width) + 2
+
+            curr_frontier_imgs = stack_images(curr_frontier_imgs, num_frontier_width)
+            curr_frontier_imgs = resize_image(curr_frontier_imgs, img.shape[1])
+
+            img = np.vstack([img, curr_frontier_imgs])
+
         self._viz_imgs.append(img)
+
+
+def pad_images_to_max_height(images):
+    # Assert all images have the same width
+    widths = [img.shape[1] for img in images]
+    assert len(set(widths)) == 1, "All images must have the same width"
+
+    # Find the maximum height
+    max_height = max(img.shape[0] for img in images)
+
+    # Pad images to the maximum height
+    padded_images = []
+    for img in images:
+        height_diff = max_height - img.shape[0]
+        if height_diff > 0:
+            # Create a white padding
+            padding = np.full((height_diff, img.shape[1], 3), 255, dtype=np.uint8)
+            # Concatenate the original image with the padding
+            padded_img = np.vstack((img, padding))
+        else:
+            padded_img = img
+        padded_images.append(padded_img)
+
+    return padded_images
+
+
+def resize_image(image, new_width):
+    # Get the original dimensions
+    height, width = image.shape[:2]
+
+    # Calculate the ratio of the new width to the old width
+    ratio = new_width / float(width)
+
+    # Calculate the new height to maintain the aspect ratio
+    new_height = int(height * ratio)
+
+    # Resize the image
+    resized_image = cv2.resize(
+        image, (new_width, new_height), interpolation=cv2.INTER_AREA
+    )
+
+    return resized_image
+
+
+def minimize_difference(x, y):
+    if y == 0:
+        return max(1, x)
+
+    closest = max(1, round(x / y))
+    return closest
+
+
+def stack_images(images, N):
+    if not images or N <= 0:
+        raise ValueError(
+            "Invalid input: images list must not be empty and N must be positive"
+        )
+
+    height, width = images[0].shape[:2]
+    rows = (len(images) - 1) // N + 1
+    result_height = height * rows
+    result_width = width * N
+
+    # Create a white canvas
+    result = np.ones((result_height, result_width, 3), dtype=np.uint8) * 255
+
+    for i, img in enumerate(images):
+        row = i // N
+        col = i % N
+        y_start = row * height
+        x_start = col * width
+        result[y_start : y_start + height, x_start : x_start + width] = img
+
+    return result
 
 
 class FrontierSet:
