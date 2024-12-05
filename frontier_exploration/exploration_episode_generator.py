@@ -438,11 +438,25 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         """
         Saves the frontier information to disk.
         """
-        # 'episode_dir' path should be {self._dataset_path}/{scene_id}/{episode_id}
-        if not osp.exists(self._episode_dir):
-            os.makedirs(self._episode_dir, exist_ok=True)
+        if "NUM_EXP_EPISODES" in os.environ:
+            num_episodes = int(os.environ["NUM_EXP_EPISODES"])
+            curr_num_episodes = len(
+                glob.glob(f"{self._dataset_path}/{self._scene_id}/*")
+            )
+            msg = f"Finished {curr_num_episodes + 1} of {num_episodes} episodes"
+            if curr_num_episodes >= num_episodes:
+                print("Reached the desired number of episodes. Stopping...")
+                import sys
+
+                sys.exit(0)
         else:
+            msg = ""
+
+        # 'episode_dir' path should be {self._dataset_path}/{scene_id}/{episode_id}
+        if osp.exists(self._episode_dir):
             return
+
+        os.makedirs(self._episode_dir, exist_ok=True)
 
         frontier_imgs_dir = osp.join(self._episode_dir, "frontier_imgs")
         self._save_frontier_images(frontier_imgs_dir)
@@ -465,15 +479,9 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         episode_json = osp.join(self._episode_dir, f"exploration_{exploration_id}.json")
         self._save_episode_json(self._episode_dir, exploration_imgs_dir, episode_json)
         # self._save_coverage_visualization(exploration_imgs_dir)
-        if "NUM_EXP_EPISODES" in os.environ:
-            num_episodes = int(os.environ["NUM_EXP_EPISODES"])
-            curr_num_episodes = len(
-                glob.glob(f"{self._dataset_path}/{self._scene_id}/*")
-            )
-            print(f"Finished {curr_num_episodes} of {num_episodes} episodes")
-            if curr_num_episodes >= num_episodes:
-                print("Reached the desired number of episodes. Stopping...")
-                quit()
+
+        if msg:
+            print(msg)
 
     def _save_coverage_visualization(self, exploration_imgs_dir: str) -> None:
         # Save visualization of the coverage
