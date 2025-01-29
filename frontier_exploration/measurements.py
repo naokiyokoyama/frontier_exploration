@@ -69,6 +69,33 @@ class FrontierExplorationMap(TopDownMap):
         self._explorer_sensor = kwargs["task"].sensor_suite.sensors[self._explorer_uuid]
         self._static_metrics = {}
 
+        import os
+
+        if "ZSOS_LOG_DIR" in os.environ:
+            from vlfm.utils.log_saver import is_evaluated
+
+            scene_id = os.path.basename(episode.scene_id).split(".")[0]
+            if is_evaluated(episode.episode_id, scene_id):
+                print(
+                    f"Reset: Skipping episode {episode.episode_id} in scene {scene_id}"
+                )
+                self._task.is_stop_called = True
+                self._static_metrics["ignore"] = 1
+            else:
+                self._static_metrics["ignore"] = 0
+                log_dir = os.environ["ZSOS_LOG_DIR"]
+                base = f"{episode.episode_id}_{scene_id}.json"
+                filename = os.path.join(log_dir, base)
+
+                from pathlib import Path
+
+                path = Path(filename)
+                try:
+                    os.makedirs(log_dir, exist_ok=True)
+                except Exception:
+                    pass
+                path.touch()
+
         super().reset_metric(episode, *args, **kwargs)
         self._draw_target_bbox_mask(episode)
 
@@ -150,6 +177,31 @@ class FrontierExplorationMap(TopDownMap):
         self._metric["is_feasible"] = self._is_feasible
         # if not self._is_feasible:
         #     self._task._is_episode_active = False
+
+        import os
+
+        if "ZSOS_LOG_DIR" in os.environ:
+            from vlfm.utils.log_saver import is_evaluated
+
+            scene_id = os.path.basename(episode.scene_id).split(".")[0]
+            if is_evaluated(
+                episode.episode_id, scene_id, ignore_stale=True, assert_complete=True
+            ):
+                print(
+                    f"Step: Skipping episode {episode.episode_id} in scene {scene_id}"
+                )
+                self._task.is_stop_called = True
+                self._static_metrics["ignore"] = 2
+            else:
+                log_dir = os.environ["ZSOS_LOG_DIR"]
+                base = f"{episode.episode_id}_{scene_id}.json"
+                filename = os.path.join(log_dir, base)
+
+                from pathlib import Path
+
+                path = Path(filename)
+                if path.exists():
+                    path.touch()
 
         # Update self._metric with the static metrics
         self._metric.update(self._static_metrics)

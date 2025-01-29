@@ -664,7 +664,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         if not self._is_exploring:
             self._record_frontiers()
-            self._visualize_map()
+            # self._visualize_map()
         else:
             if len(self._exploration_poses) == 1:
                 rgb = self._sim.get_observations_at()["rgb"]
