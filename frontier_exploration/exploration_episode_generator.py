@@ -28,6 +28,10 @@ from frontier_exploration.utils.fog_of_war import reveal_fog_of_war
 from frontier_exploration.utils.frontier_filtering import FrontierInfo, filter_frontiers
 from frontier_exploration.utils.general_utils import images_to_video, wrap_heading
 from frontier_exploration.utils.path_utils import get_path
+from frontier_exploration.utils.viz import (
+    add_text_to_image,
+    add_translucent_green_border,
+)
 
 EXPLORATION_THRESHOLD = 0.1
 
@@ -127,13 +131,6 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         self._max_frontiers = 0
         self._coverage_masks = []
 
-        if self._viz_imgs:
-            import time
-
-            output_path = f"{int(time.time())}_{self._task_type}.mp4"
-            print(f"Writing visualization images to video at {output_path}...")
-            self._viz_imgs = pad_images_to_max_height(self._viz_imgs)
-            images_to_video(self._viz_imgs, output_path, fps=5)
         self._viz_imgs = []
 
         if self._task_type == "imagenav":
@@ -417,6 +414,14 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         Returns:
             bool: True if the exploration was successfully reset, False otherwise.
         """
+        if self._viz_imgs:
+            output_path = (
+                f"{self._task_type}_{self._scene_id}_{self._episode.episode_id}.mp4"
+            )
+            print(f"Writing visualization images to video at {output_path}...")
+            self._viz_imgs = pad_images_to_max_height(self._viz_imgs)
+            images_to_video(self._viz_imgs, output_path, fps=5)
+
         self._area_thresh = self._config.exploration_area_thresh
         self._visibility_dist = self._config.exploration_visibility_dist
 
@@ -640,6 +645,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         if not self._is_exploring:
             if self._stop_at_beelining and self._state == State.BEELINE:
+                print("STOP: Beelining")
                 action = ActionIDs.STOP
             else:
                 if self._state != State.EXPLORE:
@@ -652,6 +658,8 @@ class ExplorationEpisodeGenerator(TargetExplorer):
                     f"# frontiers: {len(self._curr_frontier_set)} "
                 )
                 action = super().get_observation(task, episode, *args, **kwargs)
+                if np.array_equal(action, ActionIDs.STOP):
+                    print("STOP: Ground truth path completed.")
         else:
             # BaseExplorer already calls _update_frontiers() and get_closest_waypoint()
             # at every step no matter what, so we don't need to call them here
@@ -759,7 +767,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         if not exploration:
             # Draw the goal point as a filled red circle of size 4
-            goal_px = self._map_coors_to_pixel(self._episode.goals[0].position)[::-1]
+            goal_px = self._map_coors_to_pixel(self._closest_goal)[::-1]
             cv2.circle(top_down_map_vis, tuple(goal_px), 4, (0, 0, 255), -1)
 
             # Draw the beeline radius circle (not filled) in blue, convert meters to pixels
@@ -772,11 +780,13 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             )
             cv2.circle(top_down_map_vis, tuple(goal_px), success_radius, (0, 255, 0), 1)
 
-        # For each frontier waypoint, draw an unfilled circle in orange
+        # For each frontier waypoint, draw an unfilled circle in orange, or blue if
+        # it's the chosen waypoint.
         for waypoint in self.frontier_waypoints:
-            cv2.circle(
-                top_down_map_vis, waypoint[::-1].astype(np.int32), 2, (0, 165, 255), 1
-            )
+            color = (0, 165, 255)  # orange
+            if tuple(waypoint) == tuple(self._correct_frontier_waypoint):
+                color = (255, 0, 0)
+            cv2.circle(top_down_map_vis, waypoint[::-1].astype(np.int32), 3, color, -1)
 
         rgb = self._sim.get_observations_at()["rgb"]
 
@@ -784,7 +794,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             rgb = np.hstack([rgb, self._imagenav_goal])
         else:
             goal = np.ones_like(rgb) * 255
-            goal = add_text_to_image(goal, self._episode.object_category, font_size=1)
+            goal = add_text_to_image(goal, self._episode.object_category)
             goal = goal[: rgb.shape[0], :]
             rgb = np.hstack([rgb, goal])
 
@@ -797,18 +807,19 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             img,
             f"# frontiers: {len(self._curr_frontier_set)}  "
             f"Step: {self._step_count}",
-            font_size=1,
         )
 
         # Stack the frontiers towards the bottom
         curr_frontier_ids = list(self._curr_frontier_set)
         if curr_frontier_ids:
-            curr_frontier_imgs = [
-                self._gt_frontiers[i].rgb_img for i in curr_frontier_ids
-            ]
-            curr_frontier_imgs = [
-                cv2.cvtColor(i, cv2.COLOR_RGB2BGR) for i in curr_frontier_imgs
-            ]
+            curr_frontier_imgs = []
+            gt_i = self._frontier_pose_to_id.get(tuple(self._correct_frontier_waypoint))
+            for i in curr_frontier_ids:
+                f_img = cv2.cvtColor(self._gt_frontiers[i].rgb_img, cv2.COLOR_RGB2BGR)
+                if not exploration and i == gt_i:
+                    f_img = add_translucent_green_border(f_img)
+                curr_frontier_imgs.append(f_img)
+
             num_frontier_width = minimize_difference(map_width, scaled_width) + 2
 
             curr_frontier_imgs = stack_images(curr_frontier_imgs, num_frontier_width)
@@ -967,34 +978,3 @@ def check_mask_overlap(mask_1: np.ndarray, mask_2: np.ndarray) -> float:
         overlap_percentage = 0.0
 
     return overlap_percentage
-
-
-def add_text_to_image(image, text, font_size=3):
-    # Get image dimensions
-    height, width = image.shape[:2]
-
-    # Set font
-    font = cv2.FONT_HERSHEY_SIMPLEX
-
-    # Get text size
-    (text_width, text_height), baseline = cv2.getTextSize(text, font, font_size, 2)
-
-    # Calculate white space height (120% of text height)
-    white_space_height = int(text_height * 1.2)
-
-    # Create new image with white space
-    new_height = height + white_space_height
-    new_image = np.zeros((new_height, width, 3), dtype=np.uint8)
-    new_image[:white_space_height] = [255, 255, 255]  # White space
-    new_image[white_space_height:] = image
-
-    # Calculate text position
-    text_x = (width - text_width) // 2
-    text_y = int(white_space_height * 0.5 + text_height * 0.5)
-
-    # Add text to image
-    cv2.putText(
-        new_image, text, (text_x, text_y), font, font_size, (0, 0, 0), 3, cv2.LINE_AA
-    )
-
-    return new_image

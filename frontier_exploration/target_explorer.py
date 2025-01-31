@@ -38,6 +38,7 @@ class TargetExplorer(BaseExplorer):
         self._task: EmbodiedTask = task
         self._state: int = State.EXPLORE
         self._beeline_target: np.ndarray = np.full(3, np.nan)
+        self._closest_goal: np.ndarray = np.full(3, np.nan)
         self._goal_dist_measure: Measure = task.measurements.measures[
             DistanceToGoal.cls_uuid
         ]
@@ -49,6 +50,7 @@ class TargetExplorer(BaseExplorer):
         super()._reset(episode)
         self._state = State.EXPLORE
         self._beeline_target = np.full(3, np.nan)
+        self._closest_goal = np.full(3, np.nan)
         self._goal_dist_measure.reset_metric(episode, task=self._task)
         self._step_count = 0
 
@@ -108,9 +110,9 @@ class TargetExplorer(BaseExplorer):
 
             # Execute the appropriate behavior for the current state
             if self._state == State.BEELINE:
-                pts_cache = self._episode._shortest_path_cache
-                self._beeline_target = pts_cache.requested_ends[
-                    pts_cache.closest_end_point_index
+                path_cache = self._episode._shortest_path_cache
+                self._beeline_target = path_cache.requested_ends[
+                    path_cache.closest_end_point_index
                 ]
                 action = self._decide_action(self._beeline_target)
             elif self._state == State.PIVOT:
@@ -138,11 +140,14 @@ class TargetExplorer(BaseExplorer):
         """Returns the minimum distance to the closest target"""
         self._goal_dist_measure.update_metric(self._episode, task=self._task)
         dist = self._goal_dist_measure.get_metric()
-        if (
-            self._episode._shortest_path_cache is None
-            or len(self._episode._shortest_path_cache.points) == 0
-        ):
+        path_cache = self._episode._shortest_path_cache
+        if path_cache is None or len(path_cache.points) == 0:
             return float("inf")
+
+        self._closest_goal = path_cache.requested_ends[
+            path_cache.closest_end_point_index
+        ]
+
         return dist
 
     def _update_fog_of_war_mask(self) -> None:
@@ -157,9 +162,9 @@ class TargetExplorer(BaseExplorer):
             # set threshold
             if min_dist < self._beeline_dist_thresh:
                 self._state = State.BEELINE
-                pts_cache = self._episode._shortest_path_cache
-                self._beeline_target = pts_cache.requested_ends[
-                    pts_cache.closest_end_point_index
+                path_cache = self._episode._shortest_path_cache
+                self._beeline_target = path_cache.requested_ends[
+                    path_cache.closest_end_point_index
                 ]
 
         return updated
@@ -185,6 +190,7 @@ class TargetExplorer(BaseExplorer):
         self.fog_of_war_mask = orig_fog
         super()._update_frontiers()
 
+        # If the target_frontier is not in the updated frontiers, add it back
         if not np.any(np.all(self.frontier_waypoints == target_frontier, axis=1)):
             self.frontier_waypoints = np.vstack(
                 [target_frontier, self.frontier_waypoints]
