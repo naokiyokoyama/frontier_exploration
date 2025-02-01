@@ -157,8 +157,6 @@ class TargetExplorer(BaseExplorer):
             super()._update_fog_of_war_mask() if self._state == State.EXPLORE else False
         )
 
-        min_dist = self._get_min_dist()
-
         if self._state == State.EXPLORE:
             # Start beelining if the minimum distance to the target is less than the
             # set threshold
