@@ -130,6 +130,7 @@ def reveal_fog_of_war(
 
     # Fragment the cone using obstacles and two lines per obstacle in the cone
     visible_cone_mask = cv2.bitwise_and(cone_mask, top_down_map)
+    visible_cone_mask_copy = visible_cone_mask.copy()
     line_points = vectorize_get_line_points(curr_pt_cv2, points, max_line_len * 1.05)
     # Draw all lines simultaneously using cv2.polylines
     cv2.polylines(visible_cone_mask, line_points, isClosed=False, color=0, thickness=2)
@@ -138,14 +139,28 @@ def reveal_fog_of_war(
     final_contours, _ = cv2.findContours(
         visible_cone_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
     )
-    visible_area = None
+    closest_cnt = None
     min_dist = np.inf
     for cnt in final_contours:
         pt = tuple([int(i) for i in curr_pt_cv2])
         dist = abs(cv2.pointPolygonTest(cnt, pt, True))
         if dist < min_dist:
             min_dist = dist
-            visible_area = cnt
+            closest_cnt = cnt
+
+    if min_dist <= 3:
+        closest_cnt_mask = np.zeros_like(top_down_map)
+        cv2.drawContours(closest_cnt_mask, [closest_cnt], 0, 1, -1)
+        # Dilate by 1 pixel to ensure that the entire contour is revealed
+        closest_cnt_mask = cv2.dilate(
+            closest_cnt_mask, np.ones((3, 3), np.uint8), iterations=1
+        )
+        # Get the intersection of closest_cnt_mask and visible_cone_mask_copy
+        closest_cnt_mask = cv2.bitwise_and(closest_cnt_mask, visible_cone_mask_copy)
+        new_fog = current_fog_of_war_mask.copy()
+        new_fog[closest_cnt_mask == 1] = 1
+    else:
+        new_fog = None
 
     if enable_debug_visualization:
         vis_points_mask = vis_obstacles_mask.copy()
@@ -173,16 +188,13 @@ def reveal_fog_of_war(
         cv2.destroyWindow("vis_final_contours")
 
         vis_final = vis_top_down_map.copy()
-        # Draw each contour in a random color
-        cv2.drawContours(vis_final, [visible_area], -1, (127, 127, 127), -1)
+        vis_final[new_fog == 1] = (127, 127, 127)
         cv2.imshow("vis_final", vis_final)
         cv2.waitKey(0)
         cv2.destroyWindow("vis_final")
 
-    if min_dist > 3:
+    if new_fog is None:
         return current_fog_of_war_mask  # the closest contour was too far away
-
-    new_fog = cv2.drawContours(current_fog_of_war_mask, [visible_area], 0, 1, -1)
 
     return new_fog
 

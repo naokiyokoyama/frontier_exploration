@@ -31,6 +31,7 @@ from frontier_exploration.utils.path_utils import get_path
 from frontier_exploration.utils.viz import (
     add_text_to_image,
     add_translucent_green_border,
+    tile_images,
 )
 
 EXPLORATION_THRESHOLD = 0.1
@@ -153,6 +154,8 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         self._bad_episode = False
         self._start_z = self._sim.get_agent_state().position[1]
+
+        print(f"Starting episode {episode.episode_id} in scene {self._scene_id}")
 
     def _record_curr_pose(self) -> None:
         """
@@ -372,11 +375,10 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         updated = not np.array_equal(orig, self.fog_of_war_mask)
 
         if not self._is_exploring:
-            min_dist = self._get_min_dist()
             if self._state == State.EXPLORE:
                 # Start beelining if the minimum distance to the target is less than the
                 # set threshold
-                if min_dist < self._beeline_dist_thresh:
+                if self.check_explored_overlap():
                     self._state = State.BEELINE
                     self._beeline_target = self._episode._shortest_path_cache.points[-1]
 
@@ -414,14 +416,6 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         Returns:
             bool: True if the exploration was successfully reset, False otherwise.
         """
-        if self._viz_imgs:
-            output_path = (
-                f"{self._task_type}_{self._scene_id}_{self._episode.episode_id}.mp4"
-            )
-            print(f"Writing visualization images to video at {output_path}...")
-            self._viz_imgs = pad_images_to_max_height(self._viz_imgs)
-            images_to_video(self._viz_imgs, output_path, fps=5)
-
         self._area_thresh = self._config.exploration_area_thresh
         self._visibility_dist = self._config.exploration_visibility_dist
 
@@ -436,6 +430,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         self._exploration_successful = False
         self._first_frontier = False
         self._minimize_time = True
+        self._viz_imgs = []
 
         return self._sample_exploration_start()
 
@@ -456,6 +451,13 @@ class ExplorationEpisodeGenerator(TargetExplorer):
                 sys.exit(0)
         else:
             msg = ""
+
+        if self._viz_imgs:
+            output_path = (
+                f"{os.environ['SAVE_VIZ']}/exp_{self._task_type}_{self._scene_id}_"
+                f"{self._episode.episode_id}.mp4"
+            )
+            self._flush_visualization_images(output_path)
 
         # 'episode_dir' path should be {self._dataset_path}/{scene_id}/{episode_id}
         if osp.exists(self._episode_dir):
@@ -602,6 +604,17 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             print("Saving episode to:", episode_json)
             json.dump(json_data, f)
 
+    def _flush_visualization_images(self, output_path: str) -> None:
+        print(f"Writing visualization images to video at {output_path}...")
+        self._viz_imgs = pad_images_to_max_height(self._viz_imgs)
+        parent_dir = osp.dirname(os.path.abspath(output_path))
+        os.makedirs(parent_dir, exist_ok=True)
+        images_to_video(self._viz_imgs, output_path, fps=5)
+        self._viz_imgs = []
+        if self.times:
+            print(f"Average time: {sum(self.times) / len(self.times)}")
+            self.times = []
+
     @property
     def _exploration_coverage(self):
         return check_mask_overlap(
@@ -628,7 +641,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         self, task: EmbodiedTask, episode, *args: Any, **kwargs: Any
     ) -> np.ndarray:
         if not self._is_exploring:
-            super()._pre_step(episode)
+            super()._pre_step(episode)  # TargetExplorer._pre_step()
         else:
             BaseExplorer._pre_step(self, episode)
 
@@ -672,7 +685,8 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         if not self._is_exploring:
             self._record_frontiers()
-            # self._visualize_map()
+            if not stop_called and "SAVE_VIZ" in os.environ:
+                self._viz_imgs.append(self._visualize_map())
         else:
             if len(self._exploration_poses) == 1:
                 rgb = self._sim.get_observations_at()["rgb"]
@@ -705,11 +719,17 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
             if feasible and stop_called:
                 # Ground truth path completed; move on to exploration phase
-
                 if self._max_frontiers < 2:
                     print("Not enough frontiers!")
                     task.is_stop_called = True
                     return ActionIDs.STOP
+
+                if self._viz_imgs:
+                    output_path = (
+                        f"{os.environ['SAVE_VIZ']}/gt_{self._task_type}_"
+                        f"{self._scene_id}_{self._episode.episode_id}.mp4"
+                    )
+                    self._flush_visualization_images(output_path)
 
                 self._is_exploring = True
                 self._gt_fog_of_war_mask = self.fog_of_war_mask.copy()
@@ -717,6 +737,8 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
                 # Reset the exploration
                 success = self._reset_exploration()
+                if "SAVE_VIZ" in os.environ:
+                    self._viz_imgs.append(self._visualize_map())
                 if not success:
                     # Could not find a valid exploration path
                     print("No valid exploration path found!")
@@ -726,6 +748,10 @@ class ExplorationEpisodeGenerator(TargetExplorer):
                     return self.get_observation(task, episode, *args, **kwargs)
         else:
             # Exploration is active. Check if exploration has successfully completed.
+
+            if "SAVE_VIZ" in os.environ:
+                self._viz_imgs.append(self._visualize_map())
+
             if np.array_equal(action, ActionIDs.STOP):
                 # - The length of self._exploration_poses must be within the valid range
                 # - The coverage of the exploration must be within the valid range
@@ -753,81 +779,70 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         return action
 
-    def _visualize_map(self, exploration: bool = False):
-        if self._step_count <= 1:
-            return
+    def _visualize_map(self) -> np.ndarray:
+        vis = super()._visualize_map()
 
-        top_down_map_vis = self.top_down_map.astype(np.uint8) * 255
-        top_down_map_vis[self.fog_of_war_mask == 1] = 128
-        top_down_map_vis = cv2.cvtColor(top_down_map_vis, cv2.COLOR_GRAY2BGR)
+        if not self._is_exploring:
+            # Draw the shortest path to the closest goal in green
+            sp = np.array(self._episode._shortest_path_cache.points)
+            self._draw_path(vis, sp, color=(0, 255, 0))
 
-        # Draw the current agent position as a filled green circle of size 4
-        agent_px = self._get_agent_pixel_coords()[::-1]
-        cv2.circle(top_down_map_vis, tuple(agent_px), 4, (0, 255, 0), -1)
+        valid_goal_frontier = (
+            not self._is_exploring
+            and len(self.frontier_waypoints) > 0
+            and not np.isnan(self.frontier_waypoints).any()
+        )
+        if valid_goal_frontier:
+            correct_frontier = self._correct_frontier_waypoint
+            gt_i = self._frontier_pose_to_id.get(tuple(correct_frontier))
 
-        if not exploration:
-            # Draw the goal point as a filled red circle of size 4
-            goal_px = self._map_coors_to_pixel(self._closest_goal)[::-1]
-            cv2.circle(top_down_map_vis, tuple(goal_px), 4, (0, 0, 255), -1)
-
-            # Draw the beeline radius circle (not filled) in blue, convert meters to pixels
-            beeline_radius = self._convert_meters_to_pixel(self._beeline_dist_thresh)
-            cv2.circle(top_down_map_vis, tuple(goal_px), beeline_radius, (255, 0, 0), 1)
-
-            # Draw the success radius circle in green
-            success_radius = self._convert_meters_to_pixel(
-                self._config.success_distance
+            # Visualize its frontier segment in purple
+            self._draw_path(
+                vis,
+                self._waypoint_to_segment(correct_frontier),
+                color=(255, 0, 255),
+                thickness=2,
             )
-            cv2.circle(top_down_map_vis, tuple(goal_px), success_radius, (0, 255, 0), 1)
-
-        # For each frontier waypoint, draw an unfilled circle in orange, or blue if
-        # it's the chosen waypoint.
-        for waypoint in self.frontier_waypoints:
-            color = (0, 165, 255)  # orange
-            if tuple(waypoint) == tuple(self._correct_frontier_waypoint):
-                color = (255, 0, 0)
-            cv2.circle(top_down_map_vis, waypoint[::-1].astype(np.int32), 3, color, -1)
+            # Draw frontier midpoint
+            cv2.circle(
+                vis, correct_frontier[::-1].astype(np.int32), 3, (255, 255, 255), -1
+            )
+            cv2.circle(vis, correct_frontier[::-1].astype(np.int32), 3, (0, 0, 0), 1)
+        else:
+            gt_i = -1
 
         rgb = self._sim.get_observations_at()["rgb"]
 
         if self._task_type == "imagenav":
             rgb = np.hstack([rgb, self._imagenav_goal])
-        else:
-            goal = np.ones_like(rgb) * 255
-            goal = add_text_to_image(goal, self._episode.object_category)
-            goal = goal[: rgb.shape[0], :]
-            rgb = np.hstack([rgb, goal])
 
         rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        map_height, map_width = top_down_map_vis.shape[:2]
+        map_height, map_width = vis.shape[:2]
         scaled_width = int(rgb.shape[1] * map_height / rgb.shape[0])
         rgb_resized = cv2.resize(rgb, (scaled_width, map_height))
-        img = np.hstack([rgb_resized, top_down_map_vis])
-        img = add_text_to_image(
-            img,
-            f"# frontiers: {len(self._curr_frontier_set)}  "
-            f"Step: {self._step_count}",
-        )
+        vis = np.hstack([rgb_resized, vis])
 
-        # Stack the frontiers towards the bottom
-        curr_frontier_ids = list(self._curr_frontier_set)
-        if curr_frontier_ids:
-            curr_frontier_imgs = []
-            gt_i = self._frontier_pose_to_id.get(tuple(self._correct_frontier_waypoint))
-            for i in curr_frontier_ids:
-                f_img = cv2.cvtColor(self._gt_frontiers[i].rgb_img, cv2.COLOR_RGB2BGR)
-                if not exploration and i == gt_i:
-                    f_img = add_translucent_green_border(f_img)
-                curr_frontier_imgs.append(f_img)
+        # Add caption
+        caption = f"Step: {self._step_count}"
+        if self._task_type == "objectnav":
+            caption += f" Object: {self._episode.object_category}"
+        vis = add_text_to_image(vis, caption, top=True)
 
-            num_frontier_width = minimize_difference(map_width, scaled_width) + 2
+        # Stack the frontiers together in row major order
+        f_imgs = []
+        for f_id in list(self._curr_frontier_set):
+            f_img = cv2.cvtColor(self._gt_frontiers[f_id].rgb_img, cv2.COLOR_RGB2BGR)
+            if f_id == gt_i:
+                f_img = add_translucent_green_border(f_img, thickness=50)
+            f_imgs.append(f_img)
+        if f_imgs:
+            f_stacked = tile_images(np.array(f_imgs), max_width=3)
+            f_stacked = resize_image(f_stacked, vis.shape[1])
 
-            curr_frontier_imgs = stack_images(curr_frontier_imgs, num_frontier_width)
-            curr_frontier_imgs = resize_image(curr_frontier_imgs, img.shape[1])
+            # Stack the images together
+            vis = np.vstack([vis, f_stacked])
 
-            img = np.vstack([img, curr_frontier_imgs])
-
-        self._viz_imgs.append(img)
+        return vis
 
 
 def pad_images_to_max_height(images):
@@ -872,38 +887,6 @@ def resize_image(image, new_width):
     return resized_image
 
 
-def minimize_difference(x, y):
-    if y == 0:
-        return max(1, x)
-
-    closest = max(1, round(x / y))
-    return closest
-
-
-def stack_images(images, N):
-    if not images or N <= 0:
-        raise ValueError(
-            "Invalid input: images list must not be empty and N must be positive"
-        )
-
-    height, width = images[0].shape[:2]
-    rows = (len(images) - 1) // N + 1
-    result_height = height * rows
-    result_width = width * N
-
-    # Create a white canvas
-    result = np.ones((result_height, result_width, 3), dtype=np.uint8) * 255
-
-    for i, img in enumerate(images):
-        row = i // N
-        col = i % N
-        y_start = row * height
-        x_start = col * width
-        result[y_start : y_start + height, x_start : x_start + width] = img
-
-    return result
-
-
 class FrontierSet:
     def __init__(self, frontier_ids: list[int], best_id: int, time_step: int):
         assert best_id in frontier_ids
@@ -928,7 +911,7 @@ class ExplorationEpisodeGeneratorConfig(TargetExplorerSensorConfig):
     forward_step_size: float = 0.5  # meters
     exploration_visibility_dist: float = 4.5  # meters
     visibility_dist: float = 2.15  # meters
-    beeline_dist_thresh: float = 2.25  # meters; > visibility_dist required
+    beeline_dist_thresh: float = 1.5  # meters
     success_distance: float = 0.5  # meters
     dataset_path: str = "data/exploration_episodes/"
     max_exploration_attempts: int = 100

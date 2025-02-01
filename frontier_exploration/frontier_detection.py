@@ -1,5 +1,5 @@
 import os
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -17,7 +17,7 @@ def detect_frontier_waypoints(
     explored_mask: np.ndarray,
     area_thresh: Optional[int] = -1,
     xy: Optional[np.ndarray] = None,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, List[np.ndarray]]:
     if DEBUG:
         import time
 
@@ -58,7 +58,8 @@ def detect_frontier_waypoints(
         cv2.destroyAllWindows()
 
     waypoints = frontier_waypoints(frontiers, xy)
-    return waypoints
+
+    return waypoints, frontiers
 
 
 def detect_frontiers(
@@ -219,7 +220,12 @@ def contour_to_frontiers(contour, unexplored_mask):
     if len(filtered_frontiers) > 1 and front_last_split:
         last_frontier = filtered_frontiers.pop()
         filtered_frontiers[0] = np.concatenate((last_frontier, filtered_frontiers[0]))
-    return filtered_frontiers
+
+    filtered_frontiers_squeezed = []
+    for f in filtered_frontiers:
+        filtered_frontiers_squeezed.append(f[:, 0, :])  # from (X, 1, 2) to (X, 2)
+
+    return filtered_frontiers_squeezed
 
 
 def frontier_waypoints(
@@ -230,7 +236,7 @@ def frontier_waypoints(
     the midpoints of each frontier.
 
     Args:
-        frontiers (List[np.ndarray]): list of arrays of shape (X, 1, 2), where each
+        frontiers (List[np.ndarray]): list of arrays of shape (X, 2), where each
         array is a frontier and X is NOT the same across arrays
         xy (np.ndarray): the given coordinate
 
@@ -249,9 +255,10 @@ def get_frontier_midpoint(frontier) -> np.ndarray:
     frontier"""
     # First, reshape and expand the frontier to be a 2D array of shape (X, 2, 2)
     # representing line segments between adjacent points
-    line_segments = np.concatenate((frontier[:-1], frontier[1:]), axis=1).reshape(
-        (-1, 2, 2)
-    )
+    frontier_exp = np.expand_dims(frontier, axis=1)  # from (X, 2) to (X, 1, 2)
+    line_segments = np.concatenate(
+        (frontier_exp[:-1], frontier_exp[1:]), axis=1
+    ).reshape((-1, 2, 2))
     # Calculate the length of each line segment
     line_lengths = np.sqrt(
         np.square(line_segments[:, 0, 0] - line_segments[:, 1, 0])

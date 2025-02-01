@@ -1,8 +1,9 @@
 import os
 import random
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, List, Tuple
 
+import cv2
 import habitat_sim
 import numpy as np
 from gym import Space, spaces
@@ -81,6 +82,7 @@ class BaseExplorer(Sensor):
         self._first_frontier = False  # whether frontiers have been found yet
         self._should_update_closest_frontier: bool = True
         self._curr_closest_frontier: np.ndarray = np.full(3, np.nan)
+        self._frontier_segments: List[np.ndarray] = []  # each shape: (n, 2)
 
         self._episode = None
 
@@ -110,6 +112,8 @@ class BaseExplorer(Sensor):
         self._prev_action = None
         self._should_update_closest_frontier = True
         self._curr_closest_frontier = np.full(3, np.nan)
+        self.frontier_waypoints = np.array([])
+        self._frontier_segments = []
 
     def _get_uuid(self, *args: Any, **kwargs: Any) -> str:
         return self.cls_uuid
@@ -185,15 +189,23 @@ class BaseExplorer(Sensor):
         updated = self._update_fog_of_war_mask()
         self._should_update_closest_frontier = updated or not self._no_flip_flopping
         if updated:
-            self.frontier_waypoints = detect_frontier_waypoints(
-                self.top_down_map,
-                self.fog_of_war_mask,
-                self._area_thresh_in_pixels,
-                # xy=self._get_agent_pixel_coords(),
-            )
-            if len(self.frontier_waypoints) > 0:
-                # frontiers are in (y, x) format, need to do some swapping
-                self.frontier_waypoints = self.frontier_waypoints[:, ::-1]
+            self._compute_frontier_waypoints()
+
+    def _compute_frontier_waypoints(self):
+        frontier_waypoints, frontier_segments = detect_frontier_waypoints(
+            self.top_down_map,
+            self.fog_of_war_mask,
+            self._area_thresh_in_pixels,
+        )
+        if len(frontier_waypoints) > 0:
+            # frontiers are in (y, x) format, need to do some swapping
+            frontier_waypoints = frontier_waypoints[:, ::-1]  # shape: (n, 2)
+            frontier_segments = [fs[:, ::-1] for fs in frontier_segments]
+
+        self.frontier_waypoints = frontier_waypoints
+        self._frontier_segments = frontier_segments
+
+        return frontier_waypoints
 
     def _get_next_waypoint(self, goal: np.ndarray):
         goal_3d = self._pixel_to_map_coors(goal) if len(goal) == 2 else goal
@@ -255,7 +267,7 @@ class BaseExplorer(Sensor):
         return a_star_search(sim_waypoints, heuristic_fn, cost_fn)
 
     def _decide_action(self, target: np.ndarray) -> np.ndarray:
-        if target is None:
+        if target is None or np.isnan(target).any():
             if not self._first_frontier:
                 # If no frontiers have ever been found, likely just need to spin around
                 if self._default_dir is None:
@@ -292,7 +304,7 @@ class BaseExplorer(Sensor):
             / maps.calculate_meters_per_pixel(self._map_resolution, sim=self._sim)
         )
 
-    def _pixel_to_map_coors(self, pixel: np.ndarray) -> np.ndarray:
+    def _pixel_to_map_coors(self, pixel: np.ndarray, snap: bool = True) -> np.ndarray:
         if pixel.ndim == 1:
             x, y = pixel
         else:
@@ -304,9 +316,20 @@ class BaseExplorer(Sensor):
             self._sim,
         )
         if pixel.ndim == 1:
+            if not snap:
+                return np.array([realworld_y, self.agent_position[1], realworld_x])
             return self._sim.pathfinder.snap_point(
                 [realworld_y, self.agent_position[1], realworld_x]
             )
+
+        if not snap:
+            return np.array(
+                [
+                    [y, self.agent_position[1], x]
+                    for y, x in zip(realworld_y, realworld_x)  # noqa
+                ]
+            )
+
         snapped = [
             self._sim.pathfinder.snap_point([y, self.agent_position[1], x])
             for y, x in zip(realworld_y, realworld_x)  # noqa
@@ -321,6 +344,77 @@ class BaseExplorer(Sensor):
             sim=self._sim,
         )
         return np.array([a_x, a_y])
+
+    def _waypoint_to_segment(self, frontier_waypoint: np.ndarray) -> np.ndarray:
+        matches = np.all(self.frontier_waypoints == frontier_waypoint, axis=1)
+        matching_indices = np.where(matches)[0]
+        if len(matching_indices) == 0:
+            raise IndexError("Frontier waypoint not found in self.frontier_waypoints")
+        if len(matching_indices) > 1:
+            raise IndexError(
+                "Multiple frontier waypoints found in self.frontier_waypoints"
+            )
+        return self._frontier_segments[matching_indices[0]]
+
+    def _visualize_map(self, *args, **kwargs) -> np.ndarray:
+        # Draw the map in black and white
+        top_down_map_vis = self.top_down_map.astype(np.uint8) * 255
+
+        # Draw the fog of war in gray
+        top_down_map_vis[self.fog_of_war_mask == 1] = 128
+        top_down_map_vis = cv2.cvtColor(top_down_map_vis, cv2.COLOR_GRAY2BGR)
+
+        # Draw the current agent position as a filled green circle of size 4
+        agent_px = self._get_agent_pixel_coords()[::-1]
+        cv2.circle(top_down_map_vis, tuple(agent_px), 5, (0, 255, 0), -1)
+
+        # For each frontier waypoint, draw a filled circle in orange, or blue if
+        # it's the chosen waypoint.
+        nav_frontier = self._get_closest_waypoint()
+        for idx, waypoint in enumerate(self.frontier_waypoints):
+            if np.array_equal(nav_frontier, waypoint):
+                color = (255, 0, 0)  # blue
+            else:
+                color = (0, 165, 255)  # orange
+
+            # Visualize frontier segment first
+            self._draw_path(
+                top_down_map_vis,
+                self._frontier_segments[idx],
+                color=color,
+                thickness=2,
+            )
+            # Draw frontier midpoint
+            cv2.circle(
+                top_down_map_vis,
+                waypoint[::-1].astype(np.int32),
+                3,
+                (255, 255, 255),
+                -1,
+            )
+            cv2.circle(
+                top_down_map_vis,
+                waypoint[::-1].astype(np.int32),
+                3,
+                (0, 0, 0),
+                1,
+            )
+
+        return top_down_map_vis
+
+    def _draw_path(
+        self,
+        img: np.ndarray,
+        pts: np.ndarray,  # shape: (n, 3) or (n, 2) for 3D and pixel space
+        color: Tuple[int, int, int],
+        thickness: int = 1,
+    ):
+        if pts.shape[1] == 3:
+            p_px = np.array([self._map_coors_to_pixel(i).astype(np.int32) for i in pts])
+        else:
+            p_px = pts.astype(np.int32)
+        p_px = p_px[:, ::-1].reshape((-1, 1, 2))
+        cv2.polylines(img, [p_px], isClosed=False, color=color, thickness=thickness)
 
 
 def get_next_waypoint(
