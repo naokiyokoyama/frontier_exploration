@@ -97,6 +97,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         self._exploration_successful: bool = False
         self._start_z: float = -1.0
         self._max_frontiers: int = 0
+        self._step_count: int = 0
 
         # For ImageNav
         self._imagenav_goal: np.ndarray = np.empty((1, 1))  # 2D array
@@ -131,6 +132,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         self._gt_traj_imgs = []
         self._max_frontiers = 0
         self._coverage_masks = []
+        self._step_count = 0
 
         self._viz_imgs = []
 
@@ -174,10 +176,13 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         frontier information. Because the amount of new frontier images for one timestep
         can only be 0 or 1, the frontier id is simply set to the timestep.
         """
-        if len(self.frontier_waypoints) == 0 or self._state == State.BEELINE:
-            return  # No frontiers to record
         rgb = self._sim.get_observations_at()["rgb"]
         self._gt_traj_imgs.append(rgb)
+        assert len(self._gt_traj_imgs) - 1 == self._step_count
+
+        if len(self.frontier_waypoints) == 0 or self._state == State.BEELINE:
+            return  # No frontiers to record
+
         for f_position in self.frontier_waypoints:
             # For each frontier, convert its position to a tuple to make it hashable
             f_position_tuple: tuple[int, int] = tuple(f_position)  # noqa
@@ -697,7 +702,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         # An episode is considered bad if the agent has timed out despite the episode
         # being feasible. However, since this sensor is always called before the map is
         # updated, we have to make sure that self._step_count is > 1
-        if self._step_count == 1:
+        if self._step_count == 0:
             self._bad_episode = False
             if self._task_type == "imagenav" and np.isnan(self._imagenav_goal).all():
                 # Failed to find a suitable yaw for the goal image
@@ -776,6 +781,8 @@ class ExplorationEpisodeGenerator(TargetExplorer):
                         return self.get_observation(task, episode, *args, **kwargs)
         if stop_called:
             task.is_stop_called = True
+
+        self._step_count += 1
 
         return action
 

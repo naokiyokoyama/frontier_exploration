@@ -44,7 +44,6 @@ class TargetExplorer(BaseExplorer):
         self._goal_dist_measure: Measure = task.measurements.measures[
             DistanceToGoal.cls_uuid
         ]
-        self._step_count: int = 0
         self._should_update_closest_frontier: bool = True
         self._previous_closest_frontier: np.ndarray = np.full(3, np.nan)
 
@@ -54,7 +53,6 @@ class TargetExplorer(BaseExplorer):
         self._beeline_target = np.full(3, np.nan)
         self._closest_goal = np.full(3, np.nan)
         self._goal_dist_measure.reset_metric(episode, task=self._task)
-        self._step_count = 0
 
     @property
     def beeline_target_pixels(self) -> np.ndarray:
@@ -127,8 +125,6 @@ class TargetExplorer(BaseExplorer):
             if self._prev_action is not None:
                 self.inflection = self._prev_action != action
             self._prev_action = action
-
-        self._step_count += 1
 
         return action
 
