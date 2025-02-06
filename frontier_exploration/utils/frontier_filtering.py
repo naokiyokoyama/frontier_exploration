@@ -1,5 +1,5 @@
 import os.path as osp
-from typing import List
+from typing import Dict, List, Tuple
 
 import numpy as np
 from numba import njit
@@ -76,60 +76,64 @@ class FrontierInfo:
 
 def filter_frontiers(
     frontier_datas: List[FrontierInfo], boundary_contour: np.ndarray, gt_idx: int = -1
-) -> List[int]:
-    filtered_frontiers = []
-    inds_to_keep = []
+) -> Tuple[List[int], Dict[int, int]]:
+    filtered_finfos: List[Tuple[int, FrontierInfo]] = []
+    bad_idx_to_good_idx: Dict[int, int] = {}
 
-    for idx, fd in enumerate(frontier_datas):
+    for idx, curr_finfo in enumerate(frontier_datas):
         # For each frontier, check if any frontier so far in the filtered list overlaps
         # with it. If not, add it to the filtered list. If it does, for all overlapping
         # frontiers, keep the one with the best boundary angle, and, importantly, remove
         # the other overlapping frontiers from the filtered list and indices to keep.
-        overlapping_indices = []
+        is_overlapping = [curr_finfo.is_overlapping(f) for _, f in filtered_finfos]
 
-        for filtered_idx, filtered_fd in enumerate(filtered_frontiers):
-            if fd.is_overlapping(filtered_fd):
-                overlapping_indices.append(filtered_idx)
+        if not any(is_overlapping):
+            # Current frontier passes; add it to the filtered list
+            filtered_finfos.append((idx, curr_finfo))
+            continue
 
-        if not overlapping_indices:
-            filtered_frontiers.append(fd)
-            inds_to_keep.append(idx)
+        # Current frontier overlaps with at least one frontier in the filtered list;
+        # remove these overlapping frontiers from the filtered list
+        overlapping_finfos = [
+            (i, f) for j, (i, f) in enumerate(filtered_finfos) if is_overlapping[j]
+        ]
+        filtered_finfos = [
+            (i, f) for j, (i, f) in enumerate(filtered_finfos) if not is_overlapping[j]
+        ]
+
+        # Add current frontier to the overlapping ones
+        overlapping_finfos.append((idx, curr_finfo))
+
+        # Keep the best frontier among the overlapping ones
+        overlapping_inds = [i for i, _ in overlapping_finfos]
+        if gt_idx in overlapping_inds:
+            # The ground truth is one of the overlapping ones; keep it
+            best_finfo = (gt_idx, frontier_datas[gt_idx])
         else:
-            # Remove all overlapping_indices from the two lists; best will be re-added
-            overlapping_frontiers = []
-            overlapping_inds_to_keep = []
-            for i in overlapping_indices[::-1]:
-                overlapping_frontiers.append(filtered_frontiers.pop(i))
-                overlapping_inds_to_keep.append(inds_to_keep.pop(i))
-
-            overlapping_frontiers.append(fd)
-
-            if idx == gt_idx:
-                # The current frontier is the ground truth; cannot be removed
-                best_idx = len(overlapping_frontiers) - 1
-            elif gt_idx in overlapping_inds_to_keep:
-                # The ground truth is one of the overlapping ones; keep it
-                filtered_frontiers.append(
-                    overlapping_frontiers[overlapping_inds_to_keep.index(gt_idx)]
+            best_finfo = overlapping_finfos[
+                identify_best_frontier(
+                    [i for _, i in overlapping_finfos], boundary_contour
                 )
-                inds_to_keep.append(gt_idx)
-                continue
-            else:
-                # Compare boundary angles and keep the best one
-                best_idx = identify_best_frontier(
-                    overlapping_frontiers, boundary_contour
-                )
+            ]
 
-            if best_idx == len(overlapping_frontiers) - 1:
-                # The current frontier is the best one; add it
-                filtered_frontiers.append(fd)
-                inds_to_keep.append(idx)
-            else:
-                # The best frontier is one of the overlapping ones; add it back
-                filtered_frontiers.append(overlapping_frontiers[best_idx])
-                inds_to_keep.append(overlapping_inds_to_keep[best_idx])
+        # Add the best frontier to the filtered list
+        filtered_finfos.append(best_finfo)
 
-    return sorted(inds_to_keep)
+        # Map the bad indices to the good ones
+        for i, _ in overlapping_finfos:
+            if i != best_finfo[0]:
+                bad_idx_to_good_idx[i] = best_finfo[0]
+
+        # If any of the bad indices were previously good indices, update them
+        # final_bad_inds = [i for i, _ in overlapping_finfos if i != best_finfo[0]]
+        # new_dict = {}
+        # for k, v in bad_idx_to_good_idx.items():
+        #     new_dict[k] = best_finfo[0] if v in final_bad_inds else v
+        # bad_idx_to_good_idx = new_dict
+
+    inds_to_keep = [i for i, _ in filtered_finfos]
+
+    return sorted(inds_to_keep), bad_idx_to_good_idx
 
 
 def identify_best_frontier(

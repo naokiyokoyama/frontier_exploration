@@ -218,7 +218,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             return  # No boundary contour found
         else:
             boundary_contour = boundary_contour[0]
-        inds_to_keep = filter_frontiers(frontier_infos, boundary_contour, gt_idx)
+        inds_to_keep, _ = filter_frontiers(frontier_infos, boundary_contour, gt_idx)
         self._curr_frontier_set = frozenset(active_ids[i] for i in inds_to_keep)
         pos_set = frozenset(frontier_infos[i].agent_pose_tuple for i in inds_to_keep)
         self._max_frontiers = max(self._max_frontiers, len(self._curr_frontier_set))
@@ -231,7 +231,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
                     best_id=self._frontier_pose_to_id[
                         tuple(self._correct_frontier_waypoint)
                     ],
-                    time_step=self._step_count - 1,
+                    time_step=self._step_count,
                 )
             )
 
