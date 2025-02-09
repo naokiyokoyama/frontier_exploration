@@ -52,7 +52,8 @@ def detect_frontier_waypoints(
             color = tuple(int(i) for i in color)
             for idx2, p in enumerate(frontier):
                 if idx2 < len(frontier) - 1:
-                    cv2.line(img, p[0], frontier[idx2 + 1][0], color, 3)
+                    pt1 = tuple(int(i) for i in p)
+                    cv2.line(img, pt1, frontier[idx2 + 1], color, 3)
         cv2.imshow("frontiers", img)
         cv2.waitKey(0)
         cv2.destroyAllWindows()

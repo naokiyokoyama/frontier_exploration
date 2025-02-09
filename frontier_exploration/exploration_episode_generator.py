@@ -4,8 +4,9 @@ import glob
 import json
 import os
 import os.path as osp
+import traceback
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Dict, List
 
 import cv2
 import numpy as np
@@ -19,18 +20,22 @@ from omegaconf import DictConfig
 from frontier_exploration.base_explorer import ActionIDs, BaseExplorer, get_polar_angle
 from frontier_exploration.objnav_explorer import ObjNavExplorer
 from frontier_exploration.target_explorer import (
-    GreedyExplorerMixin,
     State,
     TargetExplorer,
     TargetExplorerSensorConfig,
 )
 from frontier_exploration.utils.fog_of_war import reveal_fog_of_war
-from frontier_exploration.utils.frontier_filtering import FrontierInfo, filter_frontiers
+from frontier_exploration.utils.frontier_filtering import FrontierFilter
 from frontier_exploration.utils.general_utils import images_to_video, wrap_heading
 from frontier_exploration.utils.path_utils import get_path
 from frontier_exploration.utils.viz import (
     add_text_to_image,
     add_translucent_green_border,
+    get_mask_except_nearest_contour,
+    pad_images_to_max_dim,
+    place_image_on_white,
+    resize_image_maintain_ratio,
+    rotate_image_orientation,
     tile_images,
 )
 
@@ -40,10 +45,18 @@ EXPLORATION_THRESHOLD = 0.1
 def default_on_exception(default_value):
     def decorator(func):
         def wrapper(*args, **kwargs):
+            if os.environ.get("EXP_DEBUG") == "1":
+                return func(*args, **kwargs)
             try:
                 return func(*args, **kwargs)
             except Exception as e:
                 print(f"Exception occurred: {e}")
+                print("Full traceback:")
+                traceback.print_exc()  # This prints the full traceback
+                print(
+                    f"Error occurred in episode {args[0]._episode.episode_id} in scene "
+                    f"{args[0]._scene_id}"
+                )
                 return default_value
 
         return wrapper
@@ -78,26 +91,23 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         self._is_exploring: bool = False
 
+        self.frontier_filter = FrontierFilter(
+            self._fov, int(self._visibility_dist_in_pixels * 1.5)
+        )
+        self._bad_idx_to_good_idx: Dict[int, int] = {}
+
         # Fields for storing data that will be recorded into the dataset
-        self._frontier_pose_to_id: dict = {}
-        self._frontier_id_to_img: dict = {}
         self._exploration_poses: list[list[float]] = []
         self._exploration_imgs: list[np.ndarray] = []
         self._exploration_fogs: list[np.ndarray] = []
-        self._gt_frontiers: list[FrontierInfo] = []  # all frontiers seen in the episode
-        self._gt_traj_imgs: list[np.ndarray] = []
-        self._seen_frontiers: set[tuple[int, int]] = set()
 
         self._gt_fog_of_war_mask: np.ndarray = np.empty((1, 1))  # 2D array
         self._latest_fog: np.ndarray = np.empty((1, 1))  # 2D array
-        self._seen_frontier_sets: set = set()
-        self._curr_frontier_set: set = set()
-        self._frontier_sets: list[FrontierSet] = []
-        self._gt_path_poses: list[list[float]] = []
+        self._gt_traj: List[GTTrajectoryState] = []
         self._exploration_successful: bool = False
         self._start_z: float = -1.0
-        self._max_frontiers: int = 0
         self._step_count: int = 0
+        self._timestep_to_greedy_idx: Dict[int, int] = {}
 
         # For ImageNav
         self._imagenav_goal: np.ndarray = np.empty((1, 1))  # 2D array
@@ -115,24 +125,19 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         self._is_exploring = False
         self._minimize_time = False
-        self._frontier_pose_to_id = {}
-        self._frontier_id_to_img = {}
+
+        self.frontier_filter.reset()
+        self._bad_idx_to_good_idx = {}
 
         self._gt_fog_of_war_mask = None
         self._latest_fog = None
-        self._seen_frontier_sets = set()
-        self._curr_frontier_set = set()
+        self._gt_traj = []
         self._exploration_poses = []
         self._exploration_imgs = []
-        self._frontier_sets = []
-        self._gt_path_poses = []
         self._exploration_successful = False
-        self._gt_frontiers = []
-        self._seen_frontiers = set()
-        self._gt_traj_imgs = []
-        self._max_frontiers = 0
         self._coverage_masks = []
         self._step_count = 0
+        self._timestep_to_greedy_idx = {}
 
         self._viz_imgs = []
 
@@ -147,97 +152,54 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         ), "Episode must have episode_id and scene_id attributes"
         if self._bad_episode:
             # Create a blank file in the cwd with the episode id and scene id
-            print(f"Episode {episode.episode_id} failed!!")
-            filename = f"{episode.episode_id}_{self._scene_id}.txt"
-            with open(filename, "w") as f:
-                f.write("")
+            print(f"Episode {self._scene_id} {episode.episode_id} failed!!")
+            # filename = f"{episode.episode_id}_{self._scene_id}.txt"
+            # with open(filename, "w") as f:
+            #     f.write("")
         elif self._step_count > 0:
-            print(f"Episode {episode.episode_id} succeeded!!")
+            print(f"Episode {self._scene_id} {episode.episode_id} succeeded!!")
 
         self._bad_episode = False
         self._start_z = self._sim.get_agent_state().position[1]
 
         print(f"Starting episode {episode.episode_id} in scene {self._scene_id}")
 
-    def _record_curr_pose(self) -> None:
-        """
-        Records the current pose of the agent.
-        """
-        # Record the current pose
-        curr_pose = self._curr_pose
-        if self._is_exploring:
-            self._exploration_poses.append(curr_pose)
-        else:
-            self._gt_path_poses.append(curr_pose)
+    @property
+    def greedy_frontier_idx(self) -> int:
+        return self._timestep_to_greedy_idx[self._step_count]
 
     def _record_frontiers(self) -> None:
-        """
-        Updates self._timestep_to_frontiers and self._frontier_pose_to_id with any new
-        frontier information. Because the amount of new frontier images for one timestep
-        can only be 0 or 1, the frontier id is simply set to the timestep.
-        """
-        rgb = self._sim.get_observations_at()["rgb"]
-        self._gt_traj_imgs.append(rgb)
-        assert len(self._gt_traj_imgs) - 1 == self._step_count
+        gt_idx = self.greedy_frontier_idx if len(self._frontier_segments) > 0 else -1
 
-        if len(self.frontier_waypoints) == 0 or self._state == State.BEELINE:
-            return  # No frontiers to record
-
-        for f_position in self.frontier_waypoints:
-            # For each frontier, convert its position to a tuple to make it hashable
-            f_position_tuple: tuple[int, int] = tuple(f_position)  # noqa
-            seen_pos_tuples = set(f.position_tuple for f in self._gt_frontiers)
-            if f_position_tuple not in seen_pos_tuples:
-                # Encountered a new frontier
-                frontier_id = len(self._gt_frontiers)
-                self._gt_frontiers.append(
-                    FrontierInfo(
-                        agent_pose=self._curr_pose,
-                        camera_position_px=self._get_agent_pixel_coords(),
-                        frontier_position=self._pixel_to_map_coors(f_position),
-                        frontier_position_px=f_position_tuple,
-                        single_fog_of_war=self._latest_fog,
-                        rgb_img=rgb,
-                    )
-                )
-                self._frontier_pose_to_id[f_position_tuple] = frontier_id
-
-        # Update the current frontier set by cross-referencing self.frontier_waypoints
-        # against self._frontier_pose_to_id
-        active_ids = [
-            self._frontier_pose_to_id[tuple(pose)] for pose in self.frontier_waypoints
-        ]
-        gt_idx = active_ids.index(
-            self._frontier_pose_to_id[tuple(self._correct_frontier_waypoint)]
+        (
+            good_indices_to_timestep,
+            self._bad_idx_to_good_idx,
+        ) = self.frontier_filter.score_and_filter_frontiers(
+            curr_f_segments=self._frontier_segments,
+            curr_cam_pos=self._get_agent_pixel_coords(),
+            curr_cam_yaw=self.agent_heading,
+            explored_area=self.fog_of_war_mask,
+            top_down_map=self.top_down_map,
+            curr_timestep_id=self._step_count,
+            gt_idx=gt_idx,
+            filter=True,
         )
-        frontier_infos = [self._gt_frontiers[i] for i in active_ids]
-        boundary_contour = cv2.findContours(
-            self.fog_of_war_mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
-        )[0]
-        if len(boundary_contour) == 0:
-            return  # No boundary contour found
-        else:
-            boundary_contour = boundary_contour[0]
-        inds_to_keep, _ = filter_frontiers(frontier_infos, boundary_contour, gt_idx)
-        self._curr_frontier_set = frozenset(active_ids[i] for i in inds_to_keep)
-        pos_set = frozenset(frontier_infos[i].agent_pose_tuple for i in inds_to_keep)
-        self._max_frontiers = max(self._max_frontiers, len(self._curr_frontier_set))
-        if pos_set not in self._seen_frontier_sets:
-            # New frontier set found
-            self._seen_frontier_sets.add(pos_set)
-            self._frontier_sets.append(
-                FrontierSet(
-                    frontier_ids=list(self._curr_frontier_set),
-                    best_id=self._frontier_pose_to_id[
-                        tuple(self._correct_frontier_waypoint)
-                    ],
-                    time_step=self._step_count,
-                )
-            )
 
-    @property
-    def _correct_frontier_waypoint(self) -> np.ndarray:
-        return GreedyExplorerMixin._get_closest_waypoint(self)
+        correct_frontier = (
+            good_indices_to_timestep[gt_idx] if good_indices_to_timestep else -1
+        )
+
+        self._gt_traj.append(
+            GTTrajectoryState(
+                timestep_id=self._step_count,
+                rgb=self._sim.get_observations_at()["rgb"],
+                all_frontiers=list(set(good_indices_to_timestep.values())),
+                correct_frontier=correct_frontier,
+                single_fog_of_war=self._latest_fog,
+            )
+        )
+
+        assert len(self._gt_traj) - 1 == self._step_count
 
     def _generate_imagenav_goal(self, episode: Episode) -> np.ndarray:
         """
@@ -254,8 +216,10 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         if self._total_fov_pixels == 0:
             height, width = self.top_down_map.shape
             single_fov = reveal_fog_of_war(
-                np.ones_like(self.top_down_map),  # fully navigable map
-                np.zeros_like(self.fog_of_war_mask),  # no explored areas
+                top_down_map=np.ones_like(self.top_down_map),  # fully navigable map
+                current_fog_of_war_mask=np.zeros_like(
+                    self.fog_of_war_mask
+                ),  # no explored areas
                 current_point=np.array((height // 2, width // 2)),
                 current_angle=0.0,
                 fov=self._fov,
@@ -274,8 +238,10 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             yaw = get_polar_angle(goal_rotation)
 
             curr_fov = reveal_fog_of_war(
-                self.top_down_map,
-                np.zeros_like(self.fog_of_war_mask),  # no explored areas
+                top_down_map=self.top_down_map,
+                current_fog_of_war_mask=np.zeros_like(
+                    self.fog_of_war_mask
+                ),  # no explored areas
                 current_point=goal_position,
                 current_angle=yaw,
                 fov=self._fov,
@@ -366,10 +332,10 @@ class ExplorationEpisodeGenerator(TargetExplorer):
     def _update_fog_of_war_mask(self):
         orig = self.fog_of_war_mask.copy()
         self._latest_fog = reveal_fog_of_war(
-            self.top_down_map,
-            np.zeros_like(self.fog_of_war_mask),
-            self._get_agent_pixel_coords(),
-            self.agent_heading,
+            top_down_map=self.top_down_map,
+            current_fog_of_war_mask=np.zeros_like(self.fog_of_war_mask),
+            current_point=self._get_agent_pixel_coords(),
+            current_angle=self.agent_heading,
             fov=self._fov,
             max_line_len=self._visibility_dist_in_pixels,
         )
@@ -389,13 +355,14 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         return updated
 
-    def _update_frontiers(self):
+    def update_frontiers(self):
         if not self._is_exploring:
             # Avoids filtering out frontiers in front of the goal
-            super()._update_frontiers()
+            super().update_frontiers()
+            self._timestep_to_greedy_idx[self._step_count] = self.greedy_waypoint_idx
         else:
             # Avoids the actual goal for the episode affecting behavior
-            BaseExplorer._update_frontiers(self)
+            BaseExplorer.update_frontiers(self)
 
     def _setup_pivot(self):
         if self._task_type == "objectnav":
@@ -466,18 +433,30 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         # 'episode_dir' path should be {self._dataset_path}/{scene_id}/{episode_id}
         if osp.exists(self._episode_dir):
+            # Episode already exists; skip saving
             return
 
         os.makedirs(self._episode_dir, exist_ok=True)
 
-        frontier_imgs_dir = osp.join(self._episode_dir, "frontier_imgs")
-        self._save_frontier_images(frontier_imgs_dir)
+        frontiers = {
+            s.timestep_id: s.to_frontier_dict()
+            for s in self._gt_traj
+            if len(s.all_frontiers) > 1
+        }
+        used_frontier_timesteps = np.sort(
+            np.unique(
+                np.array(
+                    [i for v in list(frontiers.values()) for i in v["all_frontiers"]]
+                )
+            )
+        ).tolist()
+
         self._save_rgbs_to_video(
-            self._gt_traj_imgs, osp.join(frontier_imgs_dir, "gt_traj.mp4")
+            [i.rgb for i in self._gt_traj], osp.join(self._episode_dir, "gt_traj.mp4")
         )
-        self._save_frontier_fogs(frontier_imgs_dir)
+        self._save_frontier_fogs(used_frontier_timesteps, self._episode_dir)
         if self._task_type == "imagenav":
-            self._save_imagenav_goal(frontier_imgs_dir)
+            self._save_imagenav_goal(self._episode_dir)
 
         exploration_id = len(glob.glob(f"{self._episode_dir}/exploration_imgs_*"))
         exploration_imgs_dir = osp.join(
@@ -489,7 +468,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         self._save_exploration_fogs(exploration_imgs_dir)
 
         episode_json = osp.join(self._episode_dir, f"exploration_{exploration_id}.json")
-        self._save_episode_json(self._episode_dir, exploration_imgs_dir, episode_json)
+        self._save_episode_json(frontiers, exploration_imgs_dir, episode_json)
         # self._save_coverage_visualization(exploration_imgs_dir)
 
         if msg:
@@ -510,34 +489,6 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         )
         cv2.imwrite(f"{exploration_imgs_dir}/coverage.jpg", coverage_img)
 
-    def _save_frontier_images(self, frontier_imgs_dir: str) -> None:
-        """
-        Saves the frontier images to disk.
-
-        Args:
-            frontier_imgs_dir (str): The path to the directory to save the frontier
-                images.
-        """
-        if not osp.exists(frontier_imgs_dir):
-            os.makedirs(frontier_imgs_dir, exist_ok=True)
-        for frontier_id, f_info in enumerate(self._gt_frontiers):
-            # Only save the frontier if it is a member of at least one FrontierSet
-            # that has at least 2 frontiers
-            necessary = False
-            for frontier_set in self._frontier_sets:
-                if frontier_id in frontier_set.frontier_ids and len(frontier_set) > 1:
-                    necessary = True
-                    break
-
-            if not necessary:
-                continue
-
-            img_filename = osp.join(
-                frontier_imgs_dir, f"frontier_{frontier_id:04d}.jpg"
-            )
-            img_bgr = cv2.cvtColor(f_info.rgb_img, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(img_filename, img_bgr)
-
     @staticmethod
     def _save_rgbs_to_video(rgbs: list[np.ndarray], output_path: str) -> None:
         parent_dir = osp.dirname(output_path)
@@ -549,9 +500,11 @@ class ExplorationEpisodeGenerator(TargetExplorer):
     def _save_exploration_fogs(self, dir_path: str) -> None:
         self._save_fogs(self._exploration_fogs, dir_path, "exploration")
 
-    def _save_frontier_fogs(self, dir_path: str) -> None:
+    def _save_frontier_fogs(self, valid_timesteps: List[int], dir_path: str) -> None:
         self._save_fogs(
-            [f.single_fog_of_war for f in self._gt_frontiers], dir_path, "frontiers"
+            [self._gt_traj[i].single_fog_of_war for i in valid_timesteps],
+            dir_path,
+            "frontiers",
         )
 
     @staticmethod
@@ -570,22 +523,18 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         cv2.imwrite(filepath, bgr)
 
     def _save_episode_json(
-        self, frontier_imgs_dir: str, exploration_imgs_dir: str, episode_json: str
+        self, frontiers: Dict, exploration_imgs_dir: str, episode_json: str
     ) -> None:
         """
         Saves the episode information to a JSON file.
 
         Args:
-            frontier_imgs_dir (str): The path to the directory to save the frontier
-                images.
+            frontiers (Dict): Dictionary mapping timestep ids to frontier information.
             exploration_imgs_dir (str): The path to the directory to save the
                 exploration
             episode_json (str): The path to the JSON file to save the episode
                 information.
         """
-        frontiers = {}
-        for f_id, f_info in enumerate(self._gt_frontiers):
-            frontiers.update(f_info.to_dict(f_id, frontier_imgs_dir))
 
         assert len(self._exploration_poses) == len(self._exploration_imgs), (
             f"{len(self._exploration_poses)=} " f"{len(self._exploration_imgs)=}"
@@ -594,11 +543,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             "episode_id": self._episode.episode_id,
             "scene_id": self._scene_id,
             "exploration_id": int(osp.basename(exploration_imgs_dir).split("_")[-1]),
-            "gt_path_poses": self._gt_path_poses,
-            "frontiers": frontiers,
-            "timestep_to_frontiers": {
-                fs.time_step: fs.to_dict() for fs in self._frontier_sets
-            },
+            "timestep_to_frontiers": frontiers,
             "exploration_poses": self._exploration_poses,
         }
 
@@ -611,14 +556,11 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
     def _flush_visualization_images(self, output_path: str) -> None:
         print(f"Writing visualization images to video at {output_path}...")
-        self._viz_imgs = pad_images_to_max_height(self._viz_imgs)
+        self._viz_imgs = pad_images_to_max_dim(self._viz_imgs)
         parent_dir = osp.dirname(os.path.abspath(output_path))
         os.makedirs(parent_dir, exist_ok=True)
         images_to_video(self._viz_imgs, output_path, fps=5)
         self._viz_imgs = []
-        if self.times:
-            print(f"Average time: {sum(self.times) / len(self.times)}")
-            self.times = []
 
     @property
     def _exploration_coverage(self):
@@ -654,9 +596,9 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             self._unique_episodes_only and not self._is_unique_episode
         ):
             print(
-                "STOP: One of these is true: "
-                f"{self._state == State.CANCEL = }, "
-                f"{self._unique_episodes_only and not self._is_unique_episode = }"
+                "STOP: One of these is true:\n"
+                f"\t{self._state == State.CANCEL = }\n"
+                f"\t{self._unique_episodes_only and not self._is_unique_episode = }"
             )
             task.is_stop_called = True
             return ActionIDs.STOP
@@ -669,27 +611,28 @@ class ExplorationEpisodeGenerator(TargetExplorer):
                 if self._state != State.EXPLORE:
                     # These functions are only called when self._state == State.EXPLORE,
                     # but for this class, we want to call it every step
-                    self._update_frontiers()
-                    self.closest_frontier_waypoint = self._get_closest_waypoint()
-                print(
-                    f"GT path: {len(self._gt_path_poses)} "
-                    f"# frontiers: {len(self._curr_frontier_set)} "
-                )
+                    self.update_frontiers()
+                    if self._should_update_closest_frontier:
+                        i = self._get_closest_waypoint_idx()
+                        self.closest_frontier_waypoint = self.frontier_waypoints[i]
                 action = super().get_observation(task, episode, *args, **kwargs)
                 if np.array_equal(action, ActionIDs.STOP):
                     print("STOP: Ground truth path completed.")
         else:
-            # BaseExplorer already calls _update_frontiers() and get_closest_waypoint()
+            # BaseExplorer already calls update_frontiers() and get_closest_waypoint()
             # at every step no matter what, so we don't need to call them here
             print(f"Exploring: {len(self._exploration_poses)}")
             action = BaseExplorer.get_observation(self, task, episode, *args, **kwargs)
+            self._exploration_poses.append(self._curr_pose)
 
         stop_called = np.array_equal(action, ActionIDs.STOP)
 
-        self._record_curr_pose()
-
-        if not self._is_exploring:
+        if not self._is_exploring and self._state != State.BEELINE:
             self._record_frontiers()
+            print(
+                f"GT path: {len(self._gt_traj)} "
+                f"# frontiers: {len(self._gt_traj[self._step_count].all_frontiers)} "
+            )
             if not stop_called and "SAVE_VIZ" in os.environ:
                 self._viz_imgs.append(self._visualize_map())
         else:
@@ -724,17 +667,17 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
             if feasible and stop_called:
                 # Ground truth path completed; move on to exploration phase
-                if self._max_frontiers < 2:
-                    print("Not enough frontiers!")
-                    task.is_stop_called = True
-                    return ActionIDs.STOP
-
                 if self._viz_imgs:
                     output_path = (
                         f"{os.environ['SAVE_VIZ']}/gt_{self._task_type}_"
                         f"{self._scene_id}_{self._episode.episode_id}.mp4"
                     )
                     self._flush_visualization_images(output_path)
+
+                if max([len(i.all_frontiers) for i in self._gt_traj]) < 2:
+                    print("Only one frontier or less at each timestep!")
+                    task.is_stop_called = True
+                    return ActionIDs.STOP
 
                 self._is_exploring = True
                 self._gt_fog_of_war_mask = self.fog_of_war_mask.copy()
@@ -791,123 +734,142 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         if not self._is_exploring:
             # Draw the shortest path to the closest goal in green
-            sp = np.array(self._episode._shortest_path_cache.points)
+            sp = np.array(self._valid_path.points)
             self._draw_path(vis, sp, color=(0, 255, 0))
 
-        valid_goal_frontier = (
+        valid_greedy_frontier_exists = (
             not self._is_exploring
             and len(self.frontier_waypoints) > 0
             and not np.isnan(self.frontier_waypoints).any()
         )
-        if valid_goal_frontier:
-            correct_frontier = self._correct_frontier_waypoint
-            gt_i = self._frontier_pose_to_id.get(tuple(correct_frontier))
+        if valid_greedy_frontier_exists:
+            gt_idx = self.greedy_frontier_idx
 
             # Visualize its frontier segment in purple
             self._draw_path(
-                vis,
-                self._waypoint_to_segment(correct_frontier),
-                color=(255, 0, 255),
-                thickness=2,
+                vis, self._frontier_segments[gt_idx], color=(255, 0, 255), thickness=2
             )
             # Draw frontier midpoint
-            cv2.circle(
-                vis, correct_frontier[::-1].astype(np.int32), 3, (255, 255, 255), -1
+            greedy_px = self._vsf(self.frontier_waypoints[gt_idx][::-1])
+            cv2.circle(vis, greedy_px, 4, (254, 254, 254), -1)
+            cv2.circle(vis, greedy_px, 4, (0, 0, 0), 2)
+
+            # Visualize how frontiers may have filtered other frontiers
+            for bad_idx, good_idx in self._bad_idx_to_good_idx.items():
+                bad_waypoint = self._vsf(self.frontier_waypoints[bad_idx][::-1])
+                good_waypoint = self._vsf(self.frontier_waypoints[good_idx][::-1])
+                cv2.circle(vis, bad_waypoint, 4, (200, 200, 200), 2)
+                cv2.line(vis, bad_waypoint, good_waypoint, (0, 0, 255), 1)
+
+        if not self._is_exploring:
+            curr_state = self._gt_traj[self._step_count]
+
+            # Visualize the highest scoring fow for each good frontier
+            # Generate a mask representing gray and white pixels to color in
+            gray_mask = np.all(
+                vis == np.array([128, 128, 128], dtype=vis.dtype), axis=2
             )
-            cv2.circle(vis, correct_frontier[::-1].astype(np.int32), 3, (0, 0, 0), 1)
+            white_mask = np.all(
+                vis == np.array([255, 255, 255], dtype=vis.dtype), axis=2
+            )
+            for t_step in curr_state.all_frontiers:
+                if t_step == curr_state.correct_frontier:  # green
+                    color = np.array([255, 216, 255], dtype=vis.dtype)
+                else:  # orange
+                    color = np.array([182, 238, 255], dtype=vis.dtype)
+
+                fow = self.frontier_filter.get_fog_of_war(t_step)
+                fow, _ = resize_image_maintain_ratio(
+                    fow,
+                    target_size=self._vis_map_height,
+                    interpolation=cv2.INTER_NEAREST,
+                )
+                vis[(fow & (gray_mask | white_mask)).astype(bool)] = color
         else:
-            gt_i = -1
+            curr_state = None
+
+        # Remove unnecessary parts of the map (black)
+        top_down_map, _ = resize_image_maintain_ratio(
+            self.top_down_map,
+            target_size=self._vis_map_height,
+            interpolation=cv2.INTER_NEAREST,
+        )
+        smaller_contours = get_mask_except_nearest_contour(
+            top_down_map, self._vsf(self._get_agent_pixel_coords())
+        )
+        vis[smaller_contours] = np.array([0, 0, 0], dtype=vis.dtype)
+        not_black = ~np.all(vis == np.array([0, 0, 0], dtype=vis.dtype), axis=2)
+        x, y, w, h = cv2.boundingRect(not_black.astype(np.uint8))
+        y_min, y_max = max(0, y - 15), min(vis.shape[0], y + h + 15)
+        x_min, x_max = max(0, x - 15), min(vis.shape[1], x + w + 15)
+        vis = vis[y_min:y_max, x_min:x_max]
 
         rgb = self._sim.get_observations_at()["rgb"]
+        other = (
+            self._imagenav_goal
+            if self._task_type == "imagenav"
+            else np.ones_like(rgb) * 255
+        )
+        rgb = cv2.cvtColor(np.hstack([rgb, other]), cv2.COLOR_RGB2BGR)
+        if curr_state is not None:
+            # Orient it to 'portrait' mode
+            vis = rotate_image_orientation(vis, portrait_mode=True)
 
-        if self._task_type == "imagenav":
-            rgb = np.hstack([rgb, self._imagenav_goal])
+            rgb, _ = resize_image_maintain_ratio(
+                rgb,
+                vis.shape[0] // 2,
+                interpolation=cv2.INTER_AREA,
+                use_shorter_dim=True,
+            )
+            # Stack the frontiers together in row major order
+            f_imgs = []
+            for t_step in curr_state.all_frontiers:
+                f_img = cv2.cvtColor(self._gt_traj[t_step].rgb, cv2.COLOR_RGB2BGR)
+                if t_step == curr_state.correct_frontier:
+                    f_img = add_translucent_green_border(f_img, thickness=80)
+                f_imgs.append(f_img)
 
-        rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        map_height, map_width = vis.shape[:2]
-        scaled_width = int(rgb.shape[1] * map_height / rgb.shape[0])
-        rgb_resized = cv2.resize(rgb, (scaled_width, map_height))
-        vis = np.hstack([rgb_resized, vis])
+            f_imgs_h, f_imgs_w = vis.shape[0] - rgb.shape[0], rgb.shape[1]
+            if f_imgs:
+                f_stacked = tile_images(np.array(f_imgs), max_width=4)
+                f_imgs_final = place_image_on_white(f_stacked, f_imgs_h, f_imgs_w)
+            else:
+                f_imgs_final = np.full((f_imgs_h, f_imgs_w, 3), 255, dtype=np.uint8)
+
+            # Stack the images together
+            vis = np.hstack([vis, np.vstack([rgb, f_imgs_final])])
+        else:
+            # Orient it to 'landscape' mode
+            vis = rotate_image_orientation(vis, portrait_mode=False)
+            vis, _ = resize_image_maintain_ratio(
+                image=vis,
+                target_size=rgb.shape[1],
+                interpolation=cv2.INTER_LANCZOS4,
+                use_shorter_dim=False,
+            )
+            vis = np.vstack([vis, rgb])
 
         # Add caption
         caption = f"Step: {self._step_count}"
         if self._task_type == "objectnav":
             caption += f" Object: {self._episode.object_category}"
-        vis = add_text_to_image(vis, caption, top=True)
-
-        # Stack the frontiers together in row major order
-        f_imgs = []
-        for f_id in list(self._curr_frontier_set):
-            f_img = cv2.cvtColor(self._gt_frontiers[f_id].rgb_img, cv2.COLOR_RGB2BGR)
-            if f_id == gt_i:
-                f_img = add_translucent_green_border(f_img, thickness=50)
-            f_imgs.append(f_img)
-        if f_imgs:
-            f_stacked = tile_images(np.array(f_imgs), max_width=3)
-            f_stacked = resize_image(f_stacked, vis.shape[1])
-
-            # Stack the images together
-            vis = np.vstack([vis, f_stacked])
+        vis = add_text_to_image(vis, caption, top=True, above_padding=20)
 
         return vis
 
 
-def pad_images_to_max_height(images):
-    # Assert all images have the same width
-    widths = [img.shape[1] for img in images]
-    assert len(set(widths)) == 1, "All images must have the same width"
+@dataclass(frozen=True)
+class GTTrajectoryState:
+    timestep_id: int
+    rgb: np.ndarray
+    all_frontiers: List[int]
+    correct_frontier: int
+    single_fog_of_war: np.ndarray
 
-    # Find the maximum height
-    max_height = max(img.shape[0] for img in images)
-
-    # Pad images to the maximum height
-    padded_images = []
-    for img in images:
-        height_diff = max_height - img.shape[0]
-        if height_diff > 0:
-            # Create a white padding
-            padding = np.full((height_diff, img.shape[1], 3), 255, dtype=np.uint8)
-            # Concatenate the original image with the padding
-            padded_img = np.vstack((img, padding))
-        else:
-            padded_img = img
-        padded_images.append(padded_img)
-
-    return padded_images
-
-
-def resize_image(image, new_width):
-    # Get the original dimensions
-    height, width = image.shape[:2]
-
-    # Calculate the ratio of the new width to the old width
-    ratio = new_width / float(width)
-
-    # Calculate the new height to maintain the aspect ratio
-    new_height = int(height * ratio)
-
-    # Resize the image
-    resized_image = cv2.resize(
-        image, (new_width, new_height), interpolation=cv2.INTER_AREA
-    )
-
-    return resized_image
-
-
-class FrontierSet:
-    def __init__(self, frontier_ids: list[int], best_id: int, time_step: int):
-        assert best_id in frontier_ids
-        self._best_id = best_id
-        self.frontier_ids = frontier_ids
-        self.time_step = time_step
-
-    def __len__(self):
-        return len(self.frontier_ids)
-
-    def to_dict(self):
+    def to_frontier_dict(self) -> Dict:
         return {
-            "frontier_ids": self.frontier_ids,
-            "best_id": self._best_id,
+            "all_frontiers": [int(i) for i in self.all_frontiers],
+            "correct_frontier": int(self.correct_frontier),
         }
 
 
@@ -931,6 +893,7 @@ class ExplorationEpisodeGeneratorConfig(TargetExplorerSensorConfig):
     task_type: str = "objectnav"
     stop_at_beelining: bool = True
     no_flip_flopping: bool = True
+    meters_per_pixel: float = 1.0 / 17.0
 
 
 cs = ConfigStore.instance()

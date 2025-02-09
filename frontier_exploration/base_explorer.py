@@ -1,7 +1,7 @@
 import os
 import random
 from dataclasses import dataclass
-from typing import Any, List, Tuple
+from typing import Any, Iterable, List, Tuple, Union
 
 import cv2
 import habitat_sim
@@ -28,6 +28,7 @@ from frontier_exploration.utils.path_utils import (
     path_dist_cost,
     path_time_cost,
 )
+from frontier_exploration.utils.viz import resize_image_maintain_ratio
 
 
 class ActionIDs:
@@ -56,12 +57,18 @@ class BaseExplorer(Sensor):
         self._forward_step_size = config.forward_step_size
         self._fov = config.fov
         self._lin_vel = config.lin_vel
-        self._map_resolution = config.map_resolution
         self._minimize_time = config.minimize_time
         self._success_distance = config.success_distance
         self._turn_angle = np.deg2rad(config.turn_angle)
         self._visibility_dist = config.visibility_dist
         self._no_flip_flopping = config.no_flip_flopping
+        self._vis_map_height = config.vis_map_height
+        if config.meters_per_pixel == -1.0:
+            self._meters_per_pixel = None
+            self._map_resolution = config.map_resolution
+        else:
+            self._meters_per_pixel = config.meters_per_pixel
+            self._map_resolution = None
 
         # Public attributes are used by the FrontierExplorationMap measurement
         self.closest_frontier_waypoint = None
@@ -73,7 +80,6 @@ class BaseExplorer(Sensor):
         self._prev_action = None
 
         self._area_thresh_in_pixels = None
-        self._visibility_dist_in_pixels = None
         self._agent_position = None
         self._agent_heading = None
         self._curr_ep_id = None
@@ -81,8 +87,8 @@ class BaseExplorer(Sensor):
         self._default_dir = None
         self._first_frontier = False  # whether frontiers have been found yet
         self._should_update_closest_frontier: bool = True
-        self._curr_closest_frontier: np.ndarray = np.full(3, np.nan)
         self._frontier_segments: List[np.ndarray] = []  # each shape: (n, 2)
+        self._viz_scale_factor: float = 1.0
 
         self._episode = None
 
@@ -90,19 +96,21 @@ class BaseExplorer(Sensor):
     def _scene_id(self) -> str:
         return os.path.basename(self._episode.scene_id).split(".")[0]
 
+    @property
+    def _visibility_dist_in_pixels(self) -> int:
+        return self._convert_meters_to_pixel(self._visibility_dist)
+
     def _reset(self, episode):
         self._episode = episode
         self.top_down_map = maps.get_topdown_map_from_sim(
             self._sim,
             map_resolution=self._map_resolution,
             draw_border=False,
+            meters_per_pixel=self._meters_per_pixel,
         )
         self.fog_of_war_mask = np.zeros_like(self.top_down_map)
         self._area_thresh_in_pixels = self._convert_meters_to_pixel(
             self._area_thresh**2
-        )
-        self._visibility_dist_in_pixels = self._convert_meters_to_pixel(
-            self._visibility_dist
         )
         self.closest_frontier_waypoint = None
         self._next_waypoint = None
@@ -111,9 +119,9 @@ class BaseExplorer(Sensor):
         self.inflection = False
         self._prev_action = None
         self._should_update_closest_frontier = True
-        self._curr_closest_frontier = np.full(3, np.nan)
         self.frontier_waypoints = np.array([])
         self._frontier_segments = []
+        self._viz_scale_factor = 1.0
 
     def _get_uuid(self, *args: Any, **kwargs: Any) -> str:
         return self.cls_uuid
@@ -155,8 +163,12 @@ class BaseExplorer(Sensor):
         self, task: EmbodiedTask, episode, *args: Any, **kwargs: Any
     ) -> np.ndarray:
         self._pre_step(episode)
-        self._update_frontiers()
-        self.closest_frontier_waypoint = self._get_closest_waypoint()
+        self.update_frontiers()
+        if self._should_update_closest_frontier:
+            i = self._get_closest_waypoint_idx()
+            self.closest_frontier_waypoint = (
+                None if i is None else self.frontier_waypoints[i]
+            )
         action = self._decide_action(self.closest_frontier_waypoint)
 
         # Inflection is used by action inflection sensor for IL
@@ -175,17 +187,17 @@ class BaseExplorer(Sensor):
     def _update_fog_of_war_mask(self):
         orig = self.fog_of_war_mask.copy()
         self.fog_of_war_mask = reveal_fog_of_war(
-            self.top_down_map,
-            self.fog_of_war_mask,
-            self._get_agent_pixel_coords(),
-            self.agent_heading,
+            top_down_map=self.top_down_map,
+            current_fog_of_war_mask=self.fog_of_war_mask,
+            current_point=self._get_agent_pixel_coords(),
+            current_angle=self.agent_heading,
             fov=self._fov,
             max_line_len=self._visibility_dist_in_pixels,
         )
         updated = not np.array_equal(orig, self.fog_of_war_mask)
         return updated
 
-    def _update_frontiers(self):
+    def update_frontiers(self):
         updated = self._update_fog_of_war_mask()
         self._should_update_closest_frontier = updated or not self._no_flip_flopping
         if updated:
@@ -214,10 +226,7 @@ class BaseExplorer(Sensor):
         )
         return next_waypoint
 
-    def _get_closest_waypoint(self):
-        if not self._should_update_closest_frontier:
-            return self._curr_closest_frontier
-
+    def _get_closest_waypoint_idx(self) -> Union[int, None]:
         if len(self.frontier_waypoints) == 0:
             return None
         sim_waypoints = self._pixel_to_map_coors(self.frontier_waypoints)
@@ -225,8 +234,7 @@ class BaseExplorer(Sensor):
         if idx is None:
             return None
 
-        self._curr_closest_frontier = self.frontier_waypoints[idx]
-        return self._curr_closest_frontier
+        return idx
 
     def _astar_search(self, sim_waypoints, start_position=None):
         if start_position is None:
@@ -299,6 +307,8 @@ class BaseExplorer(Sensor):
         return self._map_coors_to_pixel(self.agent_position)
 
     def _convert_meters_to_pixel(self, meters: float) -> int:
+        if self._meters_per_pixel is not None:
+            return int(meters / self._meters_per_pixel)
         return int(
             meters
             / maps.calculate_meters_per_pixel(self._map_resolution, sim=self._sim)
@@ -336,43 +346,70 @@ class BaseExplorer(Sensor):
         ]
         return np.array(snapped)
 
-    def _map_coors_to_pixel(self, position) -> np.ndarray:
-        a_x, a_y = maps.to_grid(
-            position[2],
-            position[0],
-            (self.top_down_map.shape[0], self.top_down_map.shape[1]),
-            sim=self._sim,
-        )
-        return np.array([a_x, a_y])
+    def _map_coors_to_pixel(self, position: Union[np.ndarray, Iterable]) -> np.ndarray:
+        if not isinstance(position, np.ndarray):
+            p_np = np.array(position)
+        else:
+            p_np = position
+        if p_np.ndim == 1:
+            assert p_np.shape[0] == 3
+            p_np = p_np.reshape(1, 3)
+            flatten = True
+        else:
+            assert p_np.shape[1] == 3
+            flatten = False
 
-    def _waypoint_to_segment(self, frontier_waypoint: np.ndarray) -> np.ndarray:
-        matches = np.all(self.frontier_waypoints == frontier_waypoint, axis=1)
-        matching_indices = np.where(matches)[0]
-        if len(matching_indices) == 0:
-            raise IndexError("Frontier waypoint not found in self.frontier_waypoints")
-        if len(matching_indices) > 1:
-            raise IndexError(
-                "Multiple frontier waypoints found in self.frontier_waypoints"
+        result = []
+        for p in p_np:
+            a_x, a_y = maps.to_grid(
+                p[2],
+                p[0],
+                (self.top_down_map.shape[0], self.top_down_map.shape[1]),
+                sim=self._sim,
             )
-        return self._frontier_segments[matching_indices[0]]
+            result.append([a_x, a_y])
+
+        if flatten:
+            return np.array(result).flatten()
+
+        return np.array(result)
+
+    def _vsf(self, px: Union[int, Iterable]) -> Union[int, np.ndarray]:
+        if isinstance(px, Iterable):
+            return (np.array(px).astype(np.float32) * self._viz_scale_factor).astype(
+                np.int32
+            )
+        return int(px * self._viz_scale_factor)
 
     def _visualize_map(self, *args, **kwargs) -> np.ndarray:
+        # Resize the map to make it large enough to see details
+        top_down_map_vis, self._viz_scale_factor = resize_image_maintain_ratio(
+            self.top_down_map,
+            target_size=self._vis_map_height,
+            interpolation=cv2.INTER_NEAREST,
+        )
+
         # Draw the map in black and white
-        top_down_map_vis = self.top_down_map.astype(np.uint8) * 255
+        top_down_map_vis = top_down_map_vis.astype(np.uint8) * 255
 
         # Draw the fog of war in gray
-        top_down_map_vis[self.fog_of_war_mask == 1] = 128
+        fow_vis, _ = resize_image_maintain_ratio(
+            self.fog_of_war_mask,
+            target_size=self._vis_map_height,
+            interpolation=cv2.INTER_NEAREST,
+        )
+        top_down_map_vis[fow_vis == 1] = 128
         top_down_map_vis = cv2.cvtColor(top_down_map_vis, cv2.COLOR_GRAY2BGR)
 
         # Draw the current agent position as a filled green circle of size 4
-        agent_px = self._get_agent_pixel_coords()[::-1]
-        cv2.circle(top_down_map_vis, tuple(agent_px), 5, (0, 255, 0), -1)
+        agent_px = self._vsf(self._get_agent_pixel_coords()[::-1])
+        cv2.circle(top_down_map_vis, agent_px, 5, (0, 255, 0), -1)
 
         # For each frontier waypoint, draw a filled circle in orange, or blue if
         # it's the chosen waypoint.
-        nav_frontier = self._get_closest_waypoint()
+        closest_idx = self._get_closest_waypoint_idx()
         for idx, waypoint in enumerate(self.frontier_waypoints):
-            if np.array_equal(nav_frontier, waypoint):
+            if idx == closest_idx:
                 color = (255, 0, 0)  # blue
             else:
                 color = (0, 165, 255)  # orange
@@ -385,20 +422,9 @@ class BaseExplorer(Sensor):
                 thickness=2,
             )
             # Draw frontier midpoint
-            cv2.circle(
-                top_down_map_vis,
-                waypoint[::-1].astype(np.int32),
-                3,
-                (255, 255, 255),
-                -1,
-            )
-            cv2.circle(
-                top_down_map_vis,
-                waypoint[::-1].astype(np.int32),
-                3,
-                (0, 0, 0),
-                1,
-            )
+            f_pt = self._vsf(waypoint[::-1])
+            cv2.circle(top_down_map_vis, f_pt, 4, (254, 254, 254), -1)
+            cv2.circle(top_down_map_vis, f_pt, 4, (0, 0, 0), 2)
 
         return top_down_map_vis
 
@@ -413,7 +439,7 @@ class BaseExplorer(Sensor):
             p_px = np.array([self._map_coors_to_pixel(i).astype(np.int32) for i in pts])
         else:
             p_px = pts.astype(np.int32)
-        p_px = p_px[:, ::-1].reshape((-1, 1, 2))
+        p_px = self._vsf(p_px[:, ::-1].reshape((-1, 1, 2)))
         cv2.polylines(img, [p_px], isClosed=False, color=color, thickness=thickness)
 
 
@@ -468,6 +494,8 @@ class BaseExplorerSensorConfig(LabSensorConfig):
     turn_angle: float = 10.0  # degrees
     visibility_dist: float = 4.5  # in meters
     no_flip_flopping: bool = False
+    vis_map_height: int = 512
+    meters_per_pixel: float = -1.0
 
 
 cs = ConfigStore.instance()

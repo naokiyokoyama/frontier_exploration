@@ -1,3 +1,5 @@
+from typing import List, Tuple
+
 import cv2
 import numpy as np
 
@@ -81,7 +83,13 @@ def tile_images(images: np.ndarray, max_width: int) -> np.ndarray:
     return canvas
 
 
-def add_text_to_image(image: np.ndarray, text: str, top: bool = False) -> np.ndarray:
+def add_text_to_image(
+    image: np.ndarray,
+    text: str,
+    top: bool = False,
+    above_padding: int = 0,
+    below_padding: int = 0,
+) -> np.ndarray:
     """
     Adds text to the given image.
 
@@ -89,16 +97,28 @@ def add_text_to_image(image: np.ndarray, text: str, top: bool = False) -> np.nda
         image (np.ndarray): Input image.
         text (str): Text to be added.
         top (bool, optional): Whether to add the text to the top or bottom of the image.
+        above_padding (int, optional): Padding above the text in pixels.
+        below_padding (int, optional): Padding below the text in pixels.
 
     Returns:
         np.ndarray: Image with text added.
     """
     width = image.shape[1]
     text_image = generate_text_image(width, text)
-    if top:
-        combined_image = np.vstack([text_image, image])
-    else:
-        combined_image = np.vstack([image, text_image])
+    v_stack = [text_image, image] if top else [image, text_image]
+
+    above = (
+        [np.full((above_padding, width, 3), 255, dtype=np.uint8)]
+        if above_padding > 0
+        else []
+    )
+    below = (
+        [np.full((below_padding, width, 3), 255, dtype=np.uint8)]
+        if below_padding > 0
+        else []
+    )
+
+    combined_image = np.vstack(above + v_stack + below)
 
     return combined_image
 
@@ -344,3 +364,235 @@ def images_to_video(video_frames: np.ndarray, output_path: str, fps: int = 30) -
     clip.close()
 
     print(f"Video saved to {output_path}")
+
+
+def resize_image_maintain_ratio(
+    image: np.ndarray,
+    target_size: int,
+    interpolation: int = cv2.INTER_AREA,
+    use_shorter_dim: bool = False,
+) -> Tuple[np.ndarray, float]:
+    """
+    Resize image maintaining aspect ratio by matching either longer or shorter dimension
+    to target_size.
+
+    Args:
+        image: numpy array from cv2.imread
+        target_size: integer length for target dimension
+        interpolation: OpenCV interpolation method, defaults to cv2.INTER_AREA
+        use_shorter_dim: if True, shorter dimension will match target_size;
+                        if False, longer dimension will match target_size (default)
+
+    Returns:
+        resized_image: resized numpy array
+        scale_factor: float to convert from original to new pixel coordinates
+    """
+    height, width = image.shape[:2]
+
+    # Determine which dimension to use for scaling
+    if (height > width) == (not use_shorter_dim):
+        new_height = target_size
+        scale_factor = target_size / height
+        new_width = int(width * scale_factor)
+    else:
+        new_width = target_size
+        scale_factor = target_size / width
+        new_height = int(height * scale_factor)
+
+    resized_image = cv2.resize(
+        image, (new_width, new_height), interpolation=interpolation
+    )
+
+    return resized_image, scale_factor
+
+
+def rotate_image_orientation(
+    image: np.ndarray, portrait_mode: bool = True
+) -> np.ndarray:
+    """
+    Rotates an image 90 degrees to achieve the desired orientation if necessary.
+    In portrait mode, the image will be rotated if width > height.
+    In landscape mode, the image will be rotated if height > width.
+
+    Args:
+        image: A numpy array representing the image (standard cv2 format)
+        portrait_mode: If True, ensures height > width. If False, ensures
+                      width > height. Defaults to True
+
+    Returns:
+        np.ndarray: A rotated copy of the image if rotation was necessary,
+                   otherwise a copy of the original image
+
+    Raises:
+        TypeError: If image is not a numpy array
+    """
+    if not isinstance(image, np.ndarray):
+        raise TypeError("Input image must be a numpy array")
+
+    height, width = image.shape[:2]
+    needs_rotation = (portrait_mode and width > height) or (
+        not portrait_mode and height > width
+    )
+
+    if needs_rotation:
+        # Rotate 90 degrees counterclockwise
+        return cv2.rotate(image.copy(), cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+    return image.copy()
+
+
+def place_image_on_white(
+    img: np.ndarray, target_height: int, target_width: int
+) -> np.ndarray:
+    """
+    Places an input image in the top-left corner of a white background while preserving
+    aspect ratio.
+
+    The function resizes the input image so that its largest dimension matches the
+    corresponding target dimension while maintaining aspect ratio. The resized image is
+    then placed in the top-left corner of a white canvas of the specified dimensions.
+
+    Args:
+        img: A BGR image as a numpy array with shape (height, width, 3)
+        target_height: Desired height of the output image in pixels
+        target_width: Desired width of the output image in pixels
+
+    Returns:
+        A BGR image as a numpy array with shape (target_height, target_width, 3)
+        containing the input image resized and placed in the top-left corner of a white
+        background
+
+    Raises:
+        ValueError: If target_height or target_width are not positive integers
+    """
+    if target_height <= 0 or target_width <= 0:
+        raise ValueError("Target dimensions must be positive integers")
+
+    # Get original image dimensions
+    h, w = img.shape[:2]
+
+    # Calculate scaling factors for both dimensions
+    scale_w = target_width / w
+    scale_h = target_height / h
+
+    # Use the smaller scaling factor to ensure image fits without cropping
+    scale = min(scale_w, scale_h)
+
+    # Calculate new dimensions
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+
+    # Resize image while maintaining aspect ratio
+    resized_img = cv2.resize(img, (new_w, new_h))
+
+    # Create white background
+    white_bg = np.full((target_height, target_width, 3), 255, dtype=np.uint8)
+
+    # Place resized image in top-left corner
+    white_bg[:new_h, :new_w] = resized_img
+
+    return white_bg
+
+
+def pad_images_to_max_dim(
+    images: List[np.ndarray], pad_height: bool = True, pad_width: bool = True
+) -> List[np.ndarray]:
+    """
+    Pad images with white to match the maximum dimensions across all images.
+
+    Args:
+        images: List of RGB images as numpy arrays with shape (H, W, 3)
+        pad_height: If True, pad shorter images to match the height of the tallest image
+        pad_width: If True, pad narrower images to match the width of the widest image
+
+    Returns:
+        List of padded images as numpy arrays with shape (H', W', 3), where H' and W'
+        are the maximum height and width respectively (if padding is enabled for that
+        dimension)
+
+    Raises:
+        AssertionError: If images don't all have the same width (when pad_width=False)
+                       or same height (when pad_height=False)
+    """
+    if not pad_width:
+        # Assert all images have the same width when width padding is disabled
+        widths = [img.shape[1] for img in images]
+        assert (
+            len(set(widths)) == 1
+        ), "All images must have the same width when pad_width=False"
+
+    if not pad_height:
+        # Assert all images have the same height when height padding is disabled
+        heights = [img.shape[0] for img in images]
+        assert (
+            len(set(heights)) == 1
+        ), "All images must have the same height when pad_height=False"
+
+    # Find the maximum dimensions
+    max_height = (
+        max(img.shape[0] for img in images) if pad_height else images[0].shape[0]
+    )
+    max_width = max(img.shape[1] for img in images) if pad_width else images[0].shape[1]
+
+    padded_images = []
+    for img in images:
+        current_height, current_width = img.shape[:2]
+
+        # Calculate padding needed for each dimension
+        height_diff = max_height - current_height if pad_height else 0
+        width_diff = max_width - current_width if pad_width else 0
+
+        if height_diff > 0 or width_diff > 0:
+            # Create padded image with white background
+            padded_img = np.full((max_height, max_width, 3), 255, dtype=np.uint8)
+            # Copy original image into top-left corner of padded image
+            padded_img[:current_height, :current_width] = img
+        else:
+            padded_img = img
+
+        padded_images.append(padded_img)
+
+    return padded_images
+
+
+def get_mask_except_nearest_contour(
+    mask: np.ndarray, point: tuple[int, int]
+) -> np.ndarray:
+    """
+    Creates a binary mask where all contours except the one closest to the given point are set to 1.
+
+    Args:
+        mask: Binary mask as numpy array of shape (H, W) with dtype bool
+        point: Tuple of (x, y) coordinates
+
+    Returns:
+        Binary mask as numpy array of shape (H, W) with dtype uint8 where pixels in all contours except the nearest one are 1
+    """
+    # Convert to grayscale and find contours
+    contours, _ = cv2.findContours(
+        mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    if not contours:
+        return np.zeros(mask.shape[:2], dtype=bool)
+
+    # Find the contour closest to the point
+    min_dist = float("inf")
+    nearest_contour = None
+
+    pt = tuple([int(i) for i in point[::-1]])
+    for contour in contours:
+        dist = cv2.pointPolygonTest(contour, pt, True)
+        dist = abs(dist)  # Convert to absolute distance
+        if dist < min_dist:
+            min_dist = dist
+            nearest_contour = contour
+
+    # Create mask with all contours
+    final_mask = np.zeros(mask.shape[:2], dtype=np.uint8)
+    cv2.drawContours(final_mask, contours, -1, 1, -1)  # Fill all contours with 1
+
+    # Remove the nearest contour from mask; fill with 0
+    cv2.drawContours(final_mask, [nearest_contour], -1, 0, -1)
+
+    return final_mask.astype(bool)

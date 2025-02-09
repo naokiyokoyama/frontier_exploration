@@ -1,13 +1,15 @@
 import random
-from typing import Any
+from typing import Any, Optional, Set, Tuple
 
 import cv2
+import habitat_sim
 import numpy as np
 from habitat import EmbodiedTask
 from habitat.core.embodied_task import Measure
 from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
 from habitat.tasks.nav.nav import DistanceToGoal
 from omegaconf import DictConfig
+from scipy.spatial import cKDTree
 
 from frontier_exploration.base_explorer import (
     ActionIDs,
@@ -15,6 +17,7 @@ from frontier_exploration.base_explorer import (
     BaseExplorerSensorConfig,
 )
 from frontier_exploration.utils.fog_of_war import reveal_fog_of_war
+from frontier_exploration.utils.general_utils import interpolate_path
 
 
 class State:
@@ -41,18 +44,28 @@ class TargetExplorer(BaseExplorer):
         self._state: int = State.EXPLORE
         self._beeline_target: np.ndarray = np.full(3, np.nan)
         self._closest_goal: np.ndarray = np.full(3, np.nan)
-        self._goal_dist_measure: Measure = task.measurements.measures[
-            DistanceToGoal.cls_uuid
-        ]
         self._should_update_closest_frontier: bool = True
-        self._previous_closest_frontier: np.ndarray = np.full(3, np.nan)
+        self._valid_goals = np.array([])
+        self._valid_path = None
+        self._previous_path_start: np.ndarray = np.full(3, np.nan)
+        self.greedy_waypoint_idx: int | None = None
 
     def _reset(self, episode) -> None:
         super()._reset(episode)
         self._state = State.EXPLORE
         self._beeline_target = np.full(3, np.nan)
         self._closest_goal = np.full(3, np.nan)
-        self._goal_dist_measure.reset_metric(episode, task=self._task)
+        self._valid_goals = np.array(
+            [
+                view_point.agent_state.position
+                for goal in self._episode.goals
+                for view_point in goal.view_points
+            ],
+            dtype=np.float32,
+        )
+        self._previous_path_start = np.full(3, np.nan)
+        self.filter_multistory_goals()
+        self.greedy_waypoint_idx = None
 
     @property
     def beeline_target_pixels(self) -> np.ndarray:
@@ -69,8 +82,6 @@ class TargetExplorer(BaseExplorer):
 
     def _pre_step(self, episode) -> None:
         super()._pre_step(episode)
-        if self._episode._shortest_path_cache is None:
-            self._goal_dist_measure.reset_metric(episode, task=self._task)
         if np.isinf(self._get_min_dist()):
             print("Invalid episode; goal cannot be reached.")
             self._state = State.CANCEL
@@ -110,10 +121,8 @@ class TargetExplorer(BaseExplorer):
 
             # Execute the appropriate behavior for the current state
             if self._state == State.BEELINE:
-                path_cache = self._episode._shortest_path_cache
-                self._beeline_target = path_cache.requested_ends[
-                    path_cache.closest_end_point_index
-                ]
+                self.filter_multistory_goals()
+                self._beeline_target = self._closest_goal
                 action = self._decide_action(self._beeline_target)
             elif self._state == State.PIVOT:
                 action = self._pivot()
@@ -128,23 +137,19 @@ class TargetExplorer(BaseExplorer):
 
         return action
 
-    def _setup_pivot(self) -> None:
+    def _setup_pivot(self) -> np.ndarray:
         raise NotImplementedError
 
-    def _pivot(self) -> None:
+    def _pivot(self) -> np.ndarray:
         raise NotImplementedError
 
     def _get_min_dist(self):
         """Returns the minimum distance to the closest target"""
-        self._goal_dist_measure.update_metric(self._episode, task=self._task)
-        dist = self._goal_dist_measure.get_metric()
-        path_cache = self._episode._shortest_path_cache
-        if path_cache is None or len(path_cache.points) == 0:
-            return np.inf
-
-        self._closest_goal = path_cache.requested_ends[
-            path_cache.closest_end_point_index
+        self.filter_multistory_goals()
+        self._closest_goal = self._valid_path.requested_ends[
+            self._valid_path.closest_end_point_index
         ]
+        dist = self._valid_path.geodesic_distance
 
         return dist
 
@@ -158,14 +163,12 @@ class TargetExplorer(BaseExplorer):
             # set threshold
             if self.check_explored_overlap():
                 self._state = State.BEELINE
-                path_cache = self._episode._shortest_path_cache
-                self._beeline_target = path_cache.requested_ends[
-                    path_cache.closest_end_point_index
-                ]
+                self._get_min_dist()
+                self._beeline_target = self._closest_goal
 
         return updated
 
-    def _update_frontiers(self) -> None:
+    def update_frontiers(self) -> None:
         # There is a small chance that the closest frontier has been filtered out
         # due to self._area_thresh_in_pixels, so we need to run it twice (w/ and w/o
         # filtering) to ensure that the closest frontier is not filtered out.
@@ -173,16 +176,18 @@ class TargetExplorer(BaseExplorer):
         orig_fog = self.fog_of_war_mask.copy()
 
         self._area_thresh_in_pixels = 0
-        super()._update_frontiers()
+        super().update_frontiers()
         self._area_thresh_in_pixels = orig_thresh  # revert to original value
 
         if len(self.frontier_waypoints) == 0:
             self.fog_of_war_mask = orig_fog  # revert to original value
-            super()._update_frontiers()
+            super().update_frontiers()
             return
 
         # Determine goal frontier when filtering is disabled
-        goal_frontier = GreedyExplorerMixin._get_closest_waypoint(self)
+        goal_frontier = self.frontier_waypoints[
+            GreedyExplorerMixin.get_greedy_waypoint_idx(self, adaptive=False)
+        ]
         # Determine the corresponding segment
         matches = np.all(self.frontier_waypoints == goal_frontier, axis=1)
         matching_indices = np.where(matches)[0]
@@ -193,21 +198,31 @@ class TargetExplorer(BaseExplorer):
         goal_segment = self._frontier_segments[matching_indices[0]]
 
         self.fog_of_war_mask = orig_fog  # revert to original value
-        super()._update_frontiers()
+        super().update_frontiers()
 
         # If the goal_frontier is MISSING from the filtered frontiers, add both it and
         # its corresponding segment back
         if len(self.frontier_waypoints) == 0:
             self.frontier_waypoints = np.array([goal_frontier])
             self._frontier_segments = [goal_segment]
+            self.greedy_waypoint_idx = 0
         else:
-            matches = np.all(self.frontier_waypoints == goal_frontier, axis=1)
+            matches = np.all(
+                np.isclose(self.frontier_waypoints, goal_frontier, rtol=0, atol=0.75),
+                axis=1,
+            )
             matching_indices = np.where(matches)[0]
             if len(matching_indices) == 0:
+                # Greedy waypoint is missing from the filtered frontiers, add it
                 self.frontier_waypoints = np.vstack(
                     [self.frontier_waypoints, goal_frontier]
                 )
                 self._frontier_segments.append(goal_segment)
+                self.greedy_waypoint_idx = len(self.frontier_waypoints) - 1
+            else:
+                # Greedy waypoint is present in the filtered frontiers, find its index
+                assert len(matching_indices) == 1
+                self.greedy_waypoint_idx = matching_indices[0]
 
     def check_explored_overlap(self) -> bool:
         # Validate inputs
@@ -219,10 +234,10 @@ class TargetExplorer(BaseExplorer):
 
         # Create mask with longer FOV cone
         longer_fov_mask = reveal_fog_of_war(
-            self.top_down_map.copy(),
-            self.fog_of_war_mask.copy(),
-            self._get_agent_pixel_coords(),
-            self.agent_heading,
+            top_down_map=self.top_down_map.copy(),
+            current_fog_of_war_mask=self.fog_of_war_mask.copy(),
+            current_point=self._get_agent_pixel_coords(),
+            current_angle=self.agent_heading,
             fov=self._fov,
             max_line_len=self._visibility_dist_in_pixels
             + self._convert_meters_to_pixel(self._beeline_dist_thresh),
@@ -230,100 +245,120 @@ class TargetExplorer(BaseExplorer):
 
         return longer_fov_mask[y, x] != 0
 
+    def filter_multistory_goals(self) -> None:
+        if np.array_equal(self.agent_position, self._previous_path_start):
+            return
+
+        # Get the shortest path to the goal
+        path = None
+        while len(self._valid_goals) > 0:
+            path = habitat_sim.MultiGoalShortestPath()
+            path.requested_ends = self._valid_goals
+            path.requested_start = self.agent_position
+            self._sim.pathfinder.find_path(path)
+            if path.closest_end_point_index == -1:
+                # No path found.
+                raise RuntimeError("No path found to any goal.")
+
+            if np.ptp(np.array(path.points)[:, 1]) < 0.7:
+                break
+
+            # Path is multi-story; remove the goal and all nearby goals from
+            # self._valid_goals
+            invalid_mask = extract_connected_component(
+                points=self._valid_goals,
+                target_idx=path.closest_end_point_index,
+                dist_thresh=0.2,
+            )
+            assert np.any(invalid_mask), "No connected component found"
+            self._valid_goals = self._valid_goals[~invalid_mask]
+            path = None
+
+        assert len(self._valid_goals) > 0
+        assert path is not None
+        self._valid_path = path
+        self._previous_path_start = self.agent_position
+
     def _visualize_map(self) -> np.ndarray:
         vis = super()._visualize_map()
 
         # Draw the goal point as a filled red circle of size 4
-        goal_px = self._map_coors_to_pixel(self._closest_goal)[::-1]
-        cv2.circle(vis, tuple(goal_px), 4, (0, 0, 255), -1)
+        goal_px = self._vsf(self._map_coors_to_pixel(self._closest_goal)[::-1])
+        cv2.circle(vis, goal_px, 4, (0, 0, 255), -1)
 
         # Draw the beeline radius circle (not filled) in blue, convert meters to pixels
         beeline_radius = self._convert_meters_to_pixel(self._beeline_dist_thresh)
-        cv2.circle(vis, tuple(goal_px), beeline_radius, (255, 0, 0), 1)
+        cv2.circle(vis, goal_px, self._vsf(beeline_radius), (255, 0, 0), 1)
 
         # Draw the success radius circle in green
         success_radius = self._convert_meters_to_pixel(self._config.success_distance)
-        cv2.circle(vis, tuple(goal_px), success_radius, (0, 255, 0), 1)
+        cv2.circle(vis, goal_px, self._vsf(success_radius), (0, 255, 0), 1)
 
         return vis
 
 
 class GreedyExplorerMixin:
-    def _get_closest_waypoint(self: TargetExplorer):
+    def _get_closest_waypoint_idx(self: TargetExplorer) -> int:
+        # For usage when the mixin is inherited
+        return GreedyExplorerMixin.get_greedy_waypoint_idx(self)
+
+    def get_greedy_waypoint_idx(self: TargetExplorer, adaptive: bool = False) -> int:
         """
         Important assumption is made here: the closest goal has not been seen yet
         (i.e., it is not in the fog of war mask). This implies that the agent MUST go
         through a frontier to reach the closest goal.
         """
-        # st = time.time()
         if len(self.frontier_waypoints) == 1:
-            return self.frontier_waypoints[0]
+            return 0
 
-        # Make a denser version of the shortest path
-        sp_3d_interp = GreedyExplorerMixin.interpolate_line(
-            self, self._episode._shortest_path_cache.points
-        )
-        # Convert to pixel coordinates
-        sp_px_interp = np.array(
-            [self._map_coors_to_pixel(i).astype(np.int32) for i in sp_3d_interp]
+        self.filter_multistory_goals()
+
+        # Make a denser version of the shortest path; remove vertical coordinate
+        sp_2d_interp = interpolate_path(
+            np.array(self._valid_path.points)[:, [0, 2]], max_dist=0.1
         )
 
-        # Find the first intersection with the fog of war mask starting from the goal.
-        # Mask needs to be dilated to ensure the path does not just border the mask.
-        kernel = np.ones((3, 3), np.uint8)
-        dilated_mask = self.fog_of_war_mask.copy()
-        dilated_mask = cv2.dilate(dilated_mask, kernel, iterations=2)
+        # Convert frontier segments from pixel to 3D coordinates
+        f_seg_2d_list = [  # remove vertical coordinate
+            self._pixel_to_map_coors(f_seg, snap=False)[:, [0, 2]]
+            for f_seg in self._frontier_segments
+        ]
 
-        sp_px_interp_reversed = sp_px_interp[::-1]
-        intersect_idx = find_first_intersection(
-            sp_px_interp_reversed, dilated_mask.astype(np.uint8)
-        )
-        intersect_px = sp_px_interp_reversed[intersect_idx]
-        intersect_3d = self._pixel_to_map_coors(intersect_px, snap=False)
-        intersect_3d[1] = 0  # don't consider vertical axis
-
-        # Convert from pixel to 3D coordinates simply for higher precision
-        f_seg_3d_list = []
-        for f_seg in self._frontier_segments:
-            f_seg_3d = self._pixel_to_map_coors(f_seg, snap=False)
-            f_seg_3d[:, 1] = 0  # don't consider vertical axis
-            f_seg_3d_list.append(f_seg_3d)
-
-        # Identify the frontier waypoint whose frontier segment has the closest point to
-        # the intersection point
-        min_idx = None
-        min_dist = np.inf
-        for idx, f_seg_3d in enumerate(f_seg_3d_list):
+        # Interpolate and then remove any points that appear in multiple segments to
+        # avoid ties
+        f_seg_2d_dense_list = []
+        for idx, f_seg_2d in enumerate(f_seg_2d_list):
             # Interpolate the line to ensure that the points are not too far apart
-            curr_segment = GreedyExplorerMixin.interpolate_line(self, f_seg_3d)
+            curr_segment = interpolate_path(f_seg_2d, max_dist=0.1)
 
-            # Remove any points that appear in other segments
-            other_segments = [f for j, f in enumerate(f_seg_3d_list) if j != idx]
-            other_points = np.vstack(other_segments).astype(curr_segment.dtype)
-            curr_segment = filter_duplicate_rows(other_points, curr_segment)
-            if len(curr_segment) == 0:
-                continue
+            # Remove any points that appear in existing segments
+            if idx > 0:
+                other_segments = [f for j, f in enumerate(f_seg_2d_list) if j < idx]
+                other_points = np.vstack(other_segments).astype(curr_segment.dtype)
+                curr_segment = filter_duplicate_rows(other_points, curr_segment)
+            if len(curr_segment) != 0:
+                f_seg_2d_dense_list.append(curr_segment)
 
-            # Use np.linalg.norm to calculate Euclidean distance from each point in the
-            # segment to intersect_3d
-            dists = np.linalg.norm(curr_segment - intersect_3d, axis=1)
-            min_dist_curr = np.min(dists)
-            if min_dist_curr < min_dist:
-                min_dist = min_dist_curr
-                min_idx = idx
+        # Store the segments into an array of shape (N, S, 2), where N is the number of
+        # segments and S is the number of points in the longest segment. Pad with
+        # np.inf so that the calculated minimum Euclidian distance is not affected by
+        # the padding.
+        max_len = max(len(f_seg) for f_seg in f_seg_2d_dense_list)
+        f_seg_2d_dense = np.full((len(f_seg_2d_dense_list), max_len, 2), np.inf)
+        for i, f_seg in enumerate(f_seg_2d_dense_list):
+            f_seg_2d_dense[i, : len(f_seg)] = f_seg
+
+        # Identify the index of the frontier segment that intersects the trajectory at
+        # its latest point within a distance threshold
+        min_idx = find_latest_intersecting_sequence(
+            f_seg_2d_dense, sp_2d_interp, dist_thresh=0.75, adaptive=adaptive
+        )
 
         assert (
             min_idx is not None
         ), f"No closest frontier found: {self._scene_id}_{self._episode.episode_id}"
 
-        return self.frontier_waypoints[min_idx]
-
-    def interpolate_line(self: TargetExplorer, line: np.ndarray):
-        line = interpolate_line(line, max_dist=0.1)
-        line = np.array([self._sim.pathfinder.snap_point(p) for p in line])
-        # Filter out any NaNs
-        line = line[~np.isnan(line).any(axis=1)]
-        return line
+        return min_idx
 
 
 def filter_duplicate_rows(array1, array2):
@@ -337,9 +372,14 @@ def filter_duplicate_rows(array1, array2):
     Returns:
     numpy.ndarray : Filtered version of array2 with duplicate rows removed
     """
-    # Convert arrays to structured arrays for easier comparison
-    # This allows us to treat each row as a single element
-    dtype = [("", array1.dtype)] * 3
+    # Convert to contiguous arrays first if needed
+    array1 = np.ascontiguousarray(array1)
+    array2 = np.ascontiguousarray(array2)
+
+    # Create a structured dtype that combines both coordinates
+    dtype = np.dtype([("x", array1.dtype), ("y", array1.dtype)])
+
+    # Convert to structured arrays
     struct1 = array1.view(dtype).reshape(-1)
     struct2 = array2.view(dtype).reshape(-1)
 
@@ -350,118 +390,125 @@ def filter_duplicate_rows(array1, array2):
     return array2[mask]
 
 
-def interpolate_line(points: np.ndarray, max_dist: float) -> np.ndarray:
+def extract_connected_component(
+    points: np.ndarray, target_idx: int, dist_thresh: float
+) -> np.ndarray:
     """
-    Interpolate additional points along a 3D line such that consecutive points
-    are no further than max_dist apart.
+    Extract the connected component (cluster) containing the target point where points
+    are connected if they are within dist_thresh distance of each other.
 
     Args:
-        points: numpy array of shape (N, 3) containing 3D points
-        max_dist: maximum allowed distance between consecutive points
+        points: (N, 3) array of 3D points
+        target_idx: Index of the target point to find the connected component for
+        dist_thresh: Maximum distance threshold for points to be considered connected
 
     Returns:
-        numpy array of shape (M, 3) containing original and interpolated points
+        np.ndarray: Boolean mask indicating which points are in the connected component
     """
-    result = [points[0]]  # Start with first point
+    # Build KD-tree for efficient nearest neighbor queries
+    tree = cKDTree(points)
 
-    for i in range(len(points) - 1):
-        p1 = points[i]
-        p2 = points[i + 1]
-        dist = np.linalg.norm(p2 - p1)
+    # Initialize arrays for tracking visited points and component membership
+    n_points = len(points)
+    in_component = np.zeros(n_points, dtype=bool)
+    to_visit = np.zeros(n_points, dtype=bool)
 
-        if dist > max_dist:
-            # Calculate number of segments needed
-            n_segments = int(np.ceil(dist / max_dist))
+    # Start with target point
+    to_visit[target_idx] = True
+    in_component[target_idx] = True
 
-            # Generate interpolated points
-            for j in range(1, n_segments):
-                t = j / n_segments
-                interp_point = p1 + t * (p2 - p1)
-                result.append(interp_point)
+    while np.any(to_visit):
+        # Get current point to process
+        current_idx = np.where(to_visit)[0][0]
+        to_visit[current_idx] = False
 
-        result.append(p2)
+        # Find all points within distance threshold
+        neighbors = tree.query_ball_point(points[current_idx], dist_thresh)
 
-    return np.array(result)
+        # Add unvisited neighbors to the component and queue
+        for neighbor_idx in neighbors:
+            if not in_component[neighbor_idx]:
+                in_component[neighbor_idx] = True
+                to_visit[neighbor_idx] = True
+
+    return in_component
 
 
-def find_closest_point(points1: np.ndarray, points2: np.ndarray) -> np.ndarray:
+def find_latest_intersecting_sequence(
+    segments: np.ndarray,
+    traj: np.ndarray,
+    dist_thresh: float,
+    adaptive: bool = True,
+) -> Optional[int]:
     """
-    Find the point in points1 that has the minimum Euclidean distance to any point in
-    points2.
+    Find the sequence in segments that intersects the trajectory at the latest point
+    while staying within an adaptive distance threshold.
 
     Args:
-        points1: Array of shape (N, 3) containing 3D points
-        points2: Array of shape (M, 3) containing 3D points
+        segments: Array of shape (N, S, 2) containing N sequences of 2D coordinates,
+                 each sequence having length S
+        traj: Array of shape (M, 2) containing M points of 2D coordinates
+        dist_thresh: Base maximum Euclidean distance threshold for considering a point
+                    as intersecting. The actual threshold used will be max(dist_thresh,
+                    min_distance) where min_distance is the smallest distance between
+                    any trajectory point and any sequence point.
+        adaptive: Whether to use an adaptive threshold based on the minimum distance
+                    between the trajectory and the sequences.
 
     Returns:
-        The point from points1 that has the smallest distance to any point in points2
-
-    Example:
-        >>> p1 = np.array([[0, 0, 0], [1, 1, 1], [2, 2, 2]])
-        >>> p2 = np.array([[0.1, 0.1, 0.1], [3, 3, 3]])
-        >>> find_closest_point(p1, p2)
-        array([0, 0, 0])
-    """
-    # Reshape arrays to enable broadcasting
-    # points1_expanded: (N, 1, 3)
-    # points2_expanded: (1, M, 3)
-    points1_expanded = points1[:, np.newaxis, :]
-    points2_expanded = points2[np.newaxis, :, :]
-
-    # Calculate squared distances between all pairs of points
-    # Result shape: (N, M)
-    squared_distances = np.sum((points1_expanded - points2_expanded) ** 2, axis=2)
-
-    # Find minimum distance for each point in points1
-    # min_distances shape: (N,)
-    min_distances = np.min(squared_distances, axis=1)
-
-    # Find the index of the point in points1 with the overall minimum distance
-    closest_point_idx = np.argmin(min_distances)
-
-    # Return the closest point
-    return points1[closest_point_idx]
-
-
-def find_first_intersection(coords: np.ndarray, mask: np.ndarray) -> int:
-    """
-    Find the index of the first coordinate that intersects with non-zero values in the
-    mask.
-
-    Args:
-        coords: np.ndarray of shape (N, 2) containing (y, x) coordinates
-        mask: np.ndarray of shape (H, W) containing binary values (0 or 1)
-
-    Returns:
-        int: Index of first intersection, or -1 if no intersection found
+        The index of the sequence that intersects the trajectory at the latest point
+        while staying within the adaptive threshold. Returns None if no sequence intersects
+        within the threshold.
 
     Raises:
-        ValueError: If coords is not of shape (N, 2) or mask is not 2-dimensional
+        ValueError: If input arrays don't match the expected shapes or dimensions
     """
-    # Input validation
-    if coords.shape[1] != 2:
-        raise ValueError(f"coords must have shape (N, 2), got {coords.shape}")
-    if mask.ndim != 2:
-        raise ValueError(f"mask must be 2-dimensional, got {mask.ndim} dimensions")
+    # Validate input shapes
+    if segments.ndim != 3 or segments.shape[-1] != 2:
+        raise ValueError(f"segments must have shape (N, S, 2), got {segments.shape}")
+    if traj.ndim != 2 or traj.shape[-1] != 2:
+        raise ValueError(f"traj must have shape (M, 2), got {traj.shape}")
 
-    # Convert coordinates to integers for array indexing
-    coords_int = coords.astype(np.int32)
+    N, S, _ = segments.shape
+    M, _ = traj.shape
 
-    # Extract y and x coordinates
-    y_coords = coords_int[:, 0]
-    x_coords = coords_int[:, 1]
+    # Reshape traj to (M, 1, 1, 2) for broadcasting
+    traj_expanded = traj[:, np.newaxis, np.newaxis, :]
 
-    # Get mask values at all coordinates in one operation
-    # Clip coordinates to prevent out-of-bounds indexing
-    y_clipped = np.clip(y_coords, 0, mask.shape[0] - 1)
-    x_clipped = np.clip(x_coords, 0, mask.shape[1] - 1)
-    mask_values = mask[y_clipped, x_clipped]
+    # Reshape segments to (1, N, S, 2) for broadcasting
+    segments_expanded = segments[np.newaxis, :, :, :]
 
-    # Find indices where mask is non-zero
-    intersections = np.nonzero(mask_values)[0]
+    # Compute Euclidean distances using broadcasting
+    # This creates a temporary array of shape (M, N, S)
+    distances = np.sqrt(np.sum((traj_expanded - segments_expanded) ** 2, axis=-1))
 
-    # Return first intersection index or -1 if none found
-    return intersections[0] if len(intersections) > 0 else -1
+    # Find minimum distance along the S dimension
+    min_dists = np.min(distances, axis=2)  # Shape: (M, N)
+
+    # Get the global minimum distance
+    global_min_dist = np.min(min_dists)
+
+    # Use the maximum of dist_thresh and global_min_dist as the threshold
+    if adaptive:
+        adaptive_thresh = max(dist_thresh, global_min_dist)
+    else:
+        adaptive_thresh = dist_thresh
+
+    # Create boolean mask for points within threshold
+    intersection_mask = min_dists <= adaptive_thresh  # Shape: (M, N)
+
+    # If no sequences intersect within threshold, return None
+    if not np.any(intersection_mask):
+        print(f"{global_min_dist = }")
+        return None
+
+    # Find the last intersection point for each sequence
+    last_intersections = np.where(intersection_mask)[0]  # Get trajectory indices
+    sequence_indices = np.where(intersection_mask)[1]  # Get sequence indices
+
+    # Find the sequence with the latest intersection
+    latest_idx = np.argmax(last_intersections)
+    return sequence_indices[latest_idx]
 
 
 class TargetExplorerSensorConfig(BaseExplorerSensorConfig):

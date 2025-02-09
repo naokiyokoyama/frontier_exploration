@@ -62,6 +62,11 @@ class FrontierExplorationMap(TopDownMap):
         self._static_metrics: Dict[str, Any] = {}  # only updated once per episode
         self._task = task
 
+    def get_original_map(self):
+        top_down_map = self._explorer_sensor.top_down_map.copy()
+        self._fog_of_war_mask = np.zeros_like(top_down_map)
+        return top_down_map
+
     def reset_metric(
         self, episode: NavigationEpisode, *args: Any, **kwargs: Any
     ) -> None:

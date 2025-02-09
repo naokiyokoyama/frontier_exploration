@@ -51,3 +51,49 @@ def images_to_video(image_list, output_path, fps=5):
     out.release()
 
     print(f"Video saved to {output_path}")
+
+
+def interpolate_path(points: np.ndarray, max_dist: float) -> np.ndarray:
+    """
+    Interpolate points along a path such that no two consecutive points are further
+    apart than max_dist.
+
+    Args:
+        points: numpy array of shape (N, 2) or (N, 3) containing coordinates
+        max_dist: maximum allowed Euclidean distance between consecutive points
+
+    Returns:
+        numpy array containing original and interpolated points, maintaining max_dist
+        constraint
+
+    Raises:
+        ValueError: if points array is not of shape (N, 2) or (N, 3)
+    """
+    if not (points.ndim == 2 and points.shape[1] in (2, 3)):
+        raise ValueError("Points array must be of shape (N, 2) or (N, 3)")
+
+    # Initialize list to store all points (original + interpolated)
+    result = [points[0]]
+
+    # Process each pair of consecutive points
+    for i in range(len(points) - 1):
+        p1 = points[i]
+        p2 = points[i + 1]
+
+        # Calculate distance between points
+        dist = np.linalg.norm(p2 - p1)
+
+        if dist > max_dist:
+            # Calculate number of segments needed
+            num_segments = int(np.ceil(dist / max_dist))
+
+            # Create interpolated points
+            for j in range(1, num_segments):
+                t = j / num_segments
+                interp_point = p1 + t * (p2 - p1)
+                result.append(interp_point)
+
+        # Add the second point of the pair
+        result.append(p2)
+
+    return np.array(result)
