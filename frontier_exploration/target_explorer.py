@@ -1,13 +1,11 @@
 import random
-from typing import Any, Optional, Set, Tuple
+from typing import Any, Optional
 
 import cv2
 import habitat_sim
 import numpy as np
 from habitat import EmbodiedTask
-from habitat.core.embodied_task import Measure
 from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
-from habitat.tasks.nav.nav import DistanceToGoal
 from omegaconf import DictConfig
 from scipy.spatial import cKDTree
 
@@ -55,14 +53,21 @@ class TargetExplorer(BaseExplorer):
         self._state = State.EXPLORE
         self._beeline_target = np.full(3, np.nan)
         self._closest_goal = np.full(3, np.nan)
-        self._valid_goals = np.array(
-            [
-                view_point.agent_state.position
-                for goal in self._episode.goals
-                for view_point in goal.view_points
-            ],
-            dtype=np.float32,
-        )
+        if hasattr(self._episode.goals[0], "view_points"):
+            # ObjectNav
+            self._valid_goals = np.array(
+                [
+                    view_point.agent_state.position
+                    for goal in self._episode.goals
+                    for view_point in goal.view_points
+                ],
+                dtype=np.float32,
+            )
+        else:
+            # ImageNav
+            self._valid_goals = np.array(
+                [goal.position for goal in self._episode.goals], dtype=np.float32
+            )
         self._previous_path_start = np.full(3, np.nan)
         self.filter_multistory_goals()
         self.greedy_waypoint_idx = None

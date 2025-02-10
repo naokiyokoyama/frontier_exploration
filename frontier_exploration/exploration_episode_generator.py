@@ -51,11 +51,12 @@ def default_on_exception(default_value):
                 return func(*args, **kwargs)
             except Exception as e:
                 print(f"Exception occurred: {e}")
-                print("Full traceback:")
-                traceback.print_exc()  # This prints the full traceback
+                if os.environ.get("NO_TRACEBACK") != "1":
+                    print("Full traceback:")
+                    traceback.print_exc()
                 print(
-                    f"Error occurred in episode {args[0]._episode.episode_id} in scene "
-                    f"{args[0]._scene_id}"
+                    f"Exception occurred in episode {args[0]._episode.episode_id} in"
+                    f" scene {args[0]._scene_id}"
                 )
                 return default_value
 
