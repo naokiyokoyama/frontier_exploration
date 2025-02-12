@@ -1,3 +1,5 @@
+from typing import Iterable, Union
+
 import cv2
 import numpy as np
 
@@ -56,13 +58,22 @@ def get_line_points(current_point, points, maxlen):
 def reveal_fog_of_war(
     top_down_map: np.ndarray,
     current_fog_of_war_mask: np.ndarray,
-    current_point: np.ndarray,
+    current_point: Union[Iterable, np.ndarray],
     current_angle: float,
     fov: float = 90,
     max_line_len: float = 100,
     enable_debug_visualization: bool = False,
 ) -> np.ndarray:
-    curr_pt_cv2 = current_point[::-1].astype(int)
+    curr_pt_cv2 = (
+        current_point
+        if isinstance(current_point, np.ndarray)
+        else np.array(current_point)
+    )
+    curr_pt_cv2 = curr_pt_cv2[::-1].astype(int)
+    assert curr_pt_cv2.shape == (
+        2,
+    ), f"current_point must be a 2D point, got {curr_pt_cv2.shape}"
+
     angle_cv2 = np.rad2deg(wrap_heading(-current_angle + np.pi / 2))
 
     cone_mask = cv2.ellipse(

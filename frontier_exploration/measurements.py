@@ -122,9 +122,8 @@ class FrontierExplorationMap(TopDownMap):
                 [0, 0, 0, 1],
             ]
         )
-
-    def get_original_map(self):
-        return self._explorer_sensor.top_down_map.copy()
+        scene_id = os.path.basename(episode.scene_id).split(".")[0]
+        print(f"Starting episode {episode.episode_id} in {scene_id}...")
 
     def update_fog_of_war_mask(self, *args, **kwargs):
         self._fog_of_war_mask = self._explorer_sensor.fog_of_war_mask.copy()

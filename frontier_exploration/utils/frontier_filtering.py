@@ -4,6 +4,7 @@ from typing import Dict, List, Tuple
 import cv2
 import numpy as np
 
+from frontier_exploration.utils.composite_fow import CompositeFOW
 from frontier_exploration.utils.fog_of_war import reveal_fog_of_war
 from frontier_exploration.utils.general_utils import wrap_heading
 
@@ -48,8 +49,8 @@ class FrontierFilter:
     """
 
     def __init__(self, fov: float, fov_length_px: int) -> None:
-        self._fov = fov
-        self._fov_length_px = fov_length_px
+        self.__fov = fov
+        self.__fov_length_px = fov_length_px
         self._image_bank: ImageBank = ImageBank(fov, fov_length_px)
         self._fseg_to_best_frontier_score: Dict[Tuple[int, ...], FrontierScore] = {}
         self.call_count: int = 0
@@ -66,7 +67,6 @@ class FrontierFilter:
         curr_f_segments: List[np.ndarray],
         curr_cam_pos: Tuple[int, int],
         curr_cam_yaw: float,
-        explored_area: np.ndarray,
         top_down_map: np.ndarray,
         curr_timestep_id: int,
         gt_idx: int = -1,
@@ -77,19 +77,20 @@ class FrontierFilter:
         ), f"Expected timestep ID to be {self.call_count}, got {curr_timestep_id}"
 
         # 1. Regenerate a longer FOW for the current position and add it to the bank
+        fow = reveal_fog_of_war(
+            top_down_map=top_down_map,
+            current_fog_of_war_mask=np.zeros_like(top_down_map),
+            current_point=curr_cam_pos,
+            current_angle=curr_cam_yaw,
+            fov=self.__fov,
+            max_line_len=self.__fov_length_px,
+        )
+
         self._image_bank.add_fow(
-            fow=reveal_fog_of_war(
-                top_down_map=top_down_map,
-                current_fog_of_war_mask=np.zeros_like(top_down_map),
-                current_point=curr_cam_pos,
-                current_angle=curr_cam_yaw,
-                fov=self._fov,
-                max_line_len=self._fov_length_px,
-            ),
+            fow=fow,
             camera_position=curr_cam_pos,
             camera_yaw=curr_cam_yaw,
             timestep_id=curr_timestep_id,
-            explored_area=explored_area,
             obstacle_map=top_down_map,
         )
 
@@ -102,9 +103,18 @@ class FrontierFilter:
         curr_f_tuples = [tuple(f.flatten()) for f in curr_f_segments]
         for f, f_tuple in zip(curr_f_segments, curr_f_tuples):
             # Update the best image and score for this frontier segment
-            self._fseg_to_best_frontier_score[
-                f_tuple
-            ] = self._image_bank.get_best_frontier_score(f)
+            """DEBUG"""
+            try:
+                self._fseg_to_best_frontier_score[
+                    f_tuple
+                ] = self._image_bank.get_best_frontier_score(f)
+            except IndexError as e:
+                map = top_down_map.astype(np.uint8) * 255
+                map = cv2.cvtColor(map, cv2.COLOR_GRAY2BGR)
+                for segment in curr_f_segments:
+                    map[segment[:, 0], segment[:, 1]] = (0, 0, 255)
+                cv2.imwrite("map_v2.png", map)
+                raise e
 
         if len(curr_f_segments) == 1:
             # Just one frontier; no filtering needed, bad_idx_to_good_idx is empty
@@ -119,16 +129,32 @@ class FrontierFilter:
                 curr_f_tuples, gt_idx
             )
         else:
-            # No filtering; all frontiers are good
-            good_indices = list(range(len(curr_f_segments)))
-            bad_idx_to_good_idx = {}
+            # Don't filter by overlap; however, should still filter out frontiers that
+            # map to the same timestep as another frontier with a higher score
+
+            # Create [(idx, f_score), ...] in descending order of f_score.score
+            f_scores = [self._fseg_to_best_frontier_score[f] for f in curr_f_tuples]
+            sorted_idx_and_f_scores = sorted(
+                list(enumerate(f_scores)), key=lambda x: x[1].score, reverse=True
+            )
+
+            bad_idx_to_good_idx: Dict[int, int] = {}
+            timestep_to_best_idx: Dict[int, int] = {}
+            for idx, f_score in sorted_idx_and_f_scores:
+                # Add current index to timestep_to_best_idx if none of the indices added
+                # so far share the same timestep as the current index
+                if f_score.timestep_id not in timestep_to_best_idx:
+                    timestep_to_best_idx[f_score.timestep_id] = idx
+                else:
+                    # Map the bad index to the good one
+                    bad_idx_to_good_idx[idx] = timestep_to_best_idx[f_score.timestep_id]
+
+            good_indices = list(timestep_to_best_idx.values())
 
         # 4. At this point, the frontiers within good_indices are high-scorers and do
         # not appear similar to each other.
         good_indices_to_timestep = {
-            idx: self._fseg_to_best_frontier_score[
-                tuple(curr_f_segments[idx].flatten())
-            ].timestep_id
+            idx: self._fseg_to_best_frontier_score[curr_f_tuples[idx]].timestep_id
             for idx in good_indices
         }
 
@@ -168,7 +194,7 @@ class FrontierFilter:
         return filter_frontiers_by_overlap(all_finfos, gt_idx)
 
 
-class ImageBank:
+class ImageBank(CompositeFOW):
     """
     Stores and manages a collection of field-of-view masks and associated camera
     positions and yaws.
@@ -178,29 +204,22 @@ class ImageBank:
     """
 
     def __init__(self, fov: float, fov_length_px: int) -> None:
+        super().__init__()
+        self.__fov = fov
+        self.__fov_length_px = fov_length_px
+
         self.call_count: int = 0
-        self._fov = fov
-        self._fov_length_px = fov_length_px
-        self._fow_masks: np.ndarray | None = None
         self._fow_masks_dilated: np.ndarray | None = None
-        self._camera_positions: np.ndarray | None = None
-        self._camera_yaws: np.ndarray | None = None
-        self._mask_idx_to_timestep_id: np.ndarray | None = None
-        self._num_masks_removed: int = 0
 
     def reset(self) -> None:
         """Resets the image bank to its initial state, clearing all stored data."""
+        super().reset()
         self.call_count = 0
-        self._fow_masks = None
         self._fow_masks_dilated = None
-        self._camera_positions = None
-        self._camera_yaws = None
-        self._mask_idx_to_timestep_id = None
-        self._num_masks_removed = 0
 
     @property
     def fov(self) -> float:
-        return self._fov
+        return self.__fov
 
     @fov.setter
     def fov(self, radians: float) -> None:
@@ -210,7 +229,7 @@ class ImageBank:
             raise ValueError("FOV must be between 0 and pi radians")
         if self.call_count != 0:
             raise RuntimeError("Cannot change FOV after adding images to the bank")
-        self._fov = radians
+        self.__fov = radians
 
     @CallCounter
     def add_fow(
@@ -219,7 +238,6 @@ class ImageBank:
         camera_position: np.ndarray,
         camera_yaw: float,
         timestep_id: int,
-        explored_area: np.ndarray,
         obstacle_map: np.ndarray,
     ) -> None:
         assert (
@@ -229,45 +247,47 @@ class ImageBank:
         # fow must be dilated by 2 pixels to ensure overlap with frontiers that may
         # have been detected at the edge of the FOV
         fow_dilated = cv2.dilate(fow, np.ones((5, 5), np.uint8), iterations=1)
-
-        # arr[None] unsqueezes arr; adds new axis at the beginning
-        if self.call_count == 0:
-            # First call since reset; initialize the bank
-            self._fow_masks = fow[None]
+        if self._fow_masks_dilated is None:
             self._fow_masks_dilated = fow_dilated[None]
-            self._camera_positions = camera_position[None]
-            self._camera_yaws = np.array([camera_yaw])
-            self._mask_idx_to_timestep_id = np.array([timestep_id])
         else:
-            self._fow_masks = np.vstack([self._fow_masks, fow[None]])
             self._fow_masks_dilated = np.vstack(
                 [self._fow_masks_dilated, fow_dilated[None]]
             )
-            self._camera_positions = np.vstack(
-                [self._camera_positions, camera_position[None]]
-            )
-            self._camera_yaws = np.hstack([self._camera_yaws, camera_yaw])
-            self._mask_idx_to_timestep_id = np.hstack(
-                [self._mask_idx_to_timestep_id, timestep_id]
-            )
 
-        self._refresh_bank(explored_area, obstacle_map)
+        super().add_fow(
+            fow=fow,
+            camera_position=camera_position,
+            camera_yaw=camera_yaw,
+            fov=self.__fov,
+            fov_length_px=self.__fov_length_px,
+            obstacle_map=obstacle_map,
+        )
+
+        self._refresh_bank(obstacle_map)
 
         assert (
             self._fow_masks.shape[0]
             == self._fow_masks_dilated.shape[0]
             == self._camera_positions.shape[0]
             == self._camera_yaws.shape[0]
-            == self._mask_idx_to_timestep_id.shape[0]
-            == timestep_id + 1 - self._num_masks_removed
+            == timestep_id + 1
         ), (
             f"{self._fow_masks.shape = }\n"
             f"{self._fow_masks_dilated.shape = }\n"
             f"{self._camera_positions.shape = }\n"
             f"{self._camera_yaws.shape = }\n"
-            f"{self._mask_idx_to_timestep_id.shape = }\n"
-            f"{timestep_id + 1 - self._num_masks_removed = }"
+            f"{timestep_id + 1 = }"
         )
+
+    def _refresh_bank(self, obstacle_map: np.ndarray) -> np.ndarray:
+        overlap_indices = super()._refresh_bank(obstacle_map)
+        for idx in overlap_indices:
+            # Update the mask to consider the current layout of obstacles
+            self._fow_masks_dilated[idx] = cv2.dilate(
+                self._fow_masks[idx], np.ones((5, 5), np.uint8), iterations=1
+            )
+
+        return overlap_indices
 
     def get_yaw_and_mask(self, timestep_id: int) -> Tuple[float, np.ndarray]:
         """
@@ -284,51 +304,7 @@ class ImageBank:
         Raises:
            AssertionError: If timestep_id doesn't match exactly one stored mask
         """
-        matching_inds = np.where(self._mask_idx_to_timestep_id == timestep_id)[0]
-        assert len(matching_inds) == 1, (
-            f"No matches or too many matches for '{timestep_id = }':\n"
-            f"{matching_inds = }\n"
-            f"{self._mask_idx_to_timestep_id = }"
-        )
-        mask_idx = matching_inds[0]
-
-        return self._camera_yaws[mask_idx], self._fow_masks[mask_idx]
-
-    def _refresh_bank(
-        self, explored_area: np.ndarray, obstacle_map: np.ndarray
-    ) -> None:
-        """
-        Update fogs that have any overlap with the current layout of obstacles, and
-        remove fogs that are fully contained within the explored area
-        """
-        # 1. Identify masks that have any overlap with the current layout of obstacles
-        # and update them.
-        overlap_indices = np.nonzero((self._fow_masks & obstacle_map).any(axis=(1, 2)))[
-            0
-        ]
-        for idx in overlap_indices:
-            # Update the mask to consider the current layout of obstacles
-            self._fow_masks[idx] = reveal_fog_of_war(
-                top_down_map=obstacle_map,
-                current_fog_of_war_mask=np.zeros_like(obstacle_map),
-                current_point=self._camera_positions[idx],
-                current_angle=self._camera_yaws[idx],
-                fov=self._fov,
-                max_line_len=self._fov_length_px,
-            )
-            self._fow_masks_dilated[idx] = cv2.dilate(
-                self._fow_masks[idx], np.ones((5, 5), np.uint8), iterations=1
-            )
-
-        # 2. Identify masks that have at least some area outside the explored area and
-        # remove the others
-        # has_overlap = (self._fow_masks & ~explored_area).any(axis=(1, 2))
-        # self._fow_masks = self._fow_masks[has_overlap]
-        # self._fow_masks_dilated = self._fow_masks_dilated[has_overlap]
-        # self._camera_positions = self._camera_positions[has_overlap]
-        # self._camera_yaws = self._camera_yaws[has_overlap]
-        # self._mask_idx_to_timestep_id = self._mask_idx_to_timestep_id[has_overlap]
-        # self._num_masks_removed += (~has_overlap).sum()
+        return self._camera_yaws[timestep_id], self._fow_masks[timestep_id]
 
     def get_best_frontier_score(self, frontier_segment: np.ndarray) -> FrontierScore:
         """
@@ -352,7 +328,7 @@ class ImageBank:
         y_coords = fs_dense[:, 0].astype(int)
         x_coords = fs_dense[:, 1].astype(int)
 
-        # Get masks that have any overlap with the frontier segment
+        # Identify masks that have any overlap with the frontier segment. The array
         # overlap_coords has shape (M, L), where M is the number of masks in the bank
         # and L is the number of points in the frontier segment. overlap_coords[i, j] is
         # True if in the i-th mask, the j-th point in the frontier segment is set
@@ -409,9 +385,8 @@ class ImageBank:
         mask_angle_sums = group_sums(all_angles, num_subsegments)  # shape: (N,)
 
         # 3. Return the timestep of the mask with the highest score and the score itself
-        mask_idx = int(overlap_indices[np.argmax(mask_angle_sums)])
+        timestep_id = int(overlap_indices[np.argmax(mask_angle_sums)])
         best_score = np.max(mask_angle_sums)
-        timestep_id = self._mask_idx_to_timestep_id[mask_idx]
 
         return FrontierScore(timestep_id=timestep_id, score=best_score)
 

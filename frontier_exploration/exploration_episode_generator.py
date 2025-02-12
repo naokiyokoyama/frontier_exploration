@@ -179,7 +179,6 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             curr_f_segments=self._frontier_segments,
             curr_cam_pos=self._get_agent_pixel_coords(),
             curr_cam_yaw=self.agent_heading,
-            explored_area=self.fog_of_war_mask,
             top_down_map=self.top_down_map,
             curr_timestep_id=self._step_count,
             gt_idx=gt_idx,
