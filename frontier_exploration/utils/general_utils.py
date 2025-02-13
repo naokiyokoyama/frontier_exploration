@@ -97,3 +97,36 @@ def interpolate_path(points: np.ndarray, max_dist: float) -> np.ndarray:
         result.append(p2)
 
     return np.array(result)
+
+
+def interpolate_line(points: np.ndarray) -> np.ndarray:
+    """
+    Interpolate a sequence of 2D pixel locations to create a continuous line.
+    Output has dtype int32, shape of (n, 2), and is in the same order as input.
+    """
+    if len(points) < 2:
+        return points
+
+    points = np.asarray(points)
+    diffs = np.diff(points, axis=0)
+
+    # Calculate required steps for each segment
+    max_steps = np.max(np.abs(diffs), axis=1)
+    steps = np.maximum(max_steps, 1)
+
+    # Initialize list to store interpolated segments
+    interpolated_points = []
+
+    # Interpolate each segment
+    for i in range(len(points) - 1):
+        curr_steps = int(steps[i])
+        segment_t = np.linspace(0, 1, curr_steps + 1).reshape(-1, 1)
+        segment = points[i] + segment_t * diffs[i]
+        interpolated_points.append(
+            segment[:-1]
+        )  # Exclude last point except for final segment
+
+    # Add the last point
+    interpolated_points.append(points[-1:])
+
+    return np.vstack(interpolated_points).astype(np.int32)

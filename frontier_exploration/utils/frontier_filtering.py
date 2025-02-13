@@ -4,9 +4,9 @@ from typing import Dict, List, Tuple
 import cv2
 import numpy as np
 
-from frontier_exploration.utils.composite_fow import CompositeFOW
+from frontier_exploration.utils.composite_fow import CompositeFOWMixin
 from frontier_exploration.utils.fog_of_war import reveal_fog_of_war
-from frontier_exploration.utils.general_utils import wrap_heading
+from frontier_exploration.utils.general_utils import interpolate_line, wrap_heading
 
 
 class CallCounter:
@@ -51,13 +51,13 @@ class FrontierFilter:
     def __init__(self, fov: float, fov_length_px: int) -> None:
         self.__fov = fov
         self.__fov_length_px = fov_length_px
-        self._image_bank: ImageBank = ImageBank(fov, fov_length_px)
+        self._f_scorer: FrontierScorer = FrontierScorer(fov, fov_length_px)
         self._fseg_to_best_frontier_score: Dict[Tuple[int, ...], FrontierScore] = {}
         self.call_count: int = 0
 
     def reset(self) -> None:
         """Resets the filter's internal state, clearing all stored images and scores."""
-        self._image_bank.reset()
+        self._f_scorer.reset()
         self._fseg_to_best_frontier_score = {}
         self.call_count = 0
 
@@ -86,12 +86,12 @@ class FrontierFilter:
             max_line_len=self.__fov_length_px,
         )
 
-        self._image_bank.add_fow(
+        self._f_scorer.add_fow(
             fow=fow,
-            camera_position=curr_cam_pos,
-            camera_yaw=curr_cam_yaw,
-            timestep_id=curr_timestep_id,
+            fow_position=curr_cam_pos,
+            fow_yaw=curr_cam_yaw,
             obstacle_map=top_down_map,
+            timestep_id=curr_timestep_id,
         )
 
         if len(curr_f_segments) == 0:
@@ -107,7 +107,7 @@ class FrontierFilter:
             try:
                 self._fseg_to_best_frontier_score[
                     f_tuple
-                ] = self._image_bank.get_best_frontier_score(f)
+                ] = self._f_scorer.get_best_frontier_score(f)
             except IndexError as e:
                 map = top_down_map.astype(np.uint8) * 255
                 map = cv2.cvtColor(map, cv2.COLOR_GRAY2BGR)
@@ -170,7 +170,7 @@ class FrontierFilter:
         Returns:
             Binary mask representing the field of view at the given timestep
         """
-        _, fow = self._image_bank.get_yaw_and_mask(timestep_id)
+        _, fow = self._f_scorer.get_yaw_and_mask(timestep_id)
         return fow
 
     def _filter_frontiers_by_overlap(
@@ -179,13 +179,13 @@ class FrontierFilter:
         all_finfos = []
         for f in f_tuples:
             f_score = self._fseg_to_best_frontier_score[f]
-            camera_yaw, single_fog_of_war = self._image_bank.get_yaw_and_mask(
+            fow_yaw, single_fog_of_war = self._f_scorer.get_yaw_and_mask(
                 f_score.timestep_id
             )
 
             all_finfos.append(
                 FrontierInfo(
-                    camera_yaw=camera_yaw,
+                    fow_yaw=fow_yaw,
                     single_fog_of_war=single_fog_of_war,
                     score=f_score.score,
                 )
@@ -194,7 +194,7 @@ class FrontierFilter:
         return filter_frontiers_by_overlap(all_finfos, gt_idx)
 
 
-class ImageBank(CompositeFOW):
+class FrontierScorer(CompositeFOWMixin):
     """
     Stores and manages a collection of field-of-view masks and associated camera
     positions and yaws.
@@ -235,10 +235,10 @@ class ImageBank(CompositeFOW):
     def add_fow(
         self,
         fow: np.ndarray,
-        camera_position: np.ndarray,
-        camera_yaw: float,
-        timestep_id: int,
+        fow_position: np.ndarray,
+        fow_yaw: float,
         obstacle_map: np.ndarray,
+        timestep_id: int,
     ) -> None:
         assert (
             self.call_count == timestep_id
@@ -246,7 +246,9 @@ class ImageBank(CompositeFOW):
 
         # fow must be dilated by 2 pixels to ensure overlap with frontiers that may
         # have been detected at the edge of the FOV
-        fow_dilated = cv2.dilate(fow, np.ones((5, 5), np.uint8), iterations=1)
+        fow_dilated = cv2.dilate(
+            fow.astype(np.uint8), np.ones((5, 5), np.uint8), iterations=1
+        ).astype(bool)
         if self._fow_masks_dilated is None:
             self._fow_masks_dilated = fow_dilated[None]
         else:
@@ -256,36 +258,36 @@ class ImageBank(CompositeFOW):
 
         super().add_fow(
             fow=fow,
-            camera_position=camera_position,
-            camera_yaw=camera_yaw,
+            fow_position=fow_position,
+            fow_yaw=fow_yaw,
             fov=self.__fov,
             fov_length_px=self.__fov_length_px,
             obstacle_map=obstacle_map,
         )
 
-        self._refresh_bank(obstacle_map)
-
         assert (
             self._fow_masks.shape[0]
             == self._fow_masks_dilated.shape[0]
-            == self._camera_positions.shape[0]
-            == self._camera_yaws.shape[0]
+            == self._fow_positions.shape[0]
+            == self._fow_yaws.shape[0]
             == timestep_id + 1
         ), (
             f"{self._fow_masks.shape = }\n"
             f"{self._fow_masks_dilated.shape = }\n"
-            f"{self._camera_positions.shape = }\n"
-            f"{self._camera_yaws.shape = }\n"
+            f"{self._fow_positions.shape = }\n"
+            f"{self._fow_yaws.shape = }\n"
             f"{timestep_id + 1 = }"
         )
 
-    def _refresh_bank(self, obstacle_map: np.ndarray) -> np.ndarray:
-        overlap_indices = super()._refresh_bank(obstacle_map)
+    def _refresh_bank(self, obstacle_map: np.ndarray, bbox: np.ndarray) -> np.ndarray:
+        overlap_indices = super()._refresh_bank(obstacle_map, bbox)
         for idx in overlap_indices:
             # Update the mask to consider the current layout of obstacles
             self._fow_masks_dilated[idx] = cv2.dilate(
-                self._fow_masks[idx], np.ones((5, 5), np.uint8), iterations=1
-            )
+                self._fow_masks[idx].astype(np.uint8),
+                np.ones((5, 5), np.uint8),
+                iterations=1,
+            ).astype(bool)
 
         return overlap_indices
 
@@ -304,7 +306,7 @@ class ImageBank(CompositeFOW):
         Raises:
            AssertionError: If timestep_id doesn't match exactly one stored mask
         """
-        return self._camera_yaws[timestep_id], self._fow_masks[timestep_id]
+        return self._fow_yaws[timestep_id], self._fow_masks[timestep_id]
 
     def get_best_frontier_score(self, frontier_segment: np.ndarray) -> FrontierScore:
         """
@@ -372,7 +374,7 @@ class ImageBank(CompositeFOW):
         # Calculate the angles between the camera position and the start and end points
         # of each subsegment. overlapping_subsegments has shape (S, 2, 2).
         overlapping_subsegments = np.stack((start_points, end_points), axis=1)
-        cam_pos = self._camera_positions[overlap_indices]  # shape: (M, 2)
+        cam_pos = self._fow_positions[overlap_indices]  # shape: (M, 2)
         # cam_pos_per_subsegment has shape (S, 2)
         cam_pos_per_subsegment = np.repeat(cam_pos, num_subsegments, axis=0)
         all_angles = calculate_angles(
@@ -401,7 +403,7 @@ class FrontierInfo:
     and field of view intersection.
     """
 
-    camera_yaw: float
+    fow_yaw: float
     single_fog_of_war: np.ndarray
     score: float
 
@@ -416,7 +418,7 @@ class FrontierInfo:
         if np.array_equal(self.single_fog_of_war, other.single_fog_of_war):
             return True
 
-        yaw_diff = abs(wrap_heading(self.camera_yaw - other.camera_yaw))
+        yaw_diff = abs(wrap_heading(self.fow_yaw - other.fow_yaw))
         if yaw_diff > np.deg2rad(45):
             return False
 
@@ -432,7 +434,7 @@ class FrontierInfo:
         if nonzero1 == 0 or nonzero2 == 0:
             percentage_overlap = 0
         else:
-            percentage_overlap = max(overlap / nonzero1, overlap / nonzero2)
+            percentage_overlap = min(overlap / nonzero1, overlap / nonzero2)
         return percentage_overlap > 0.75
 
 
@@ -479,39 +481,6 @@ def filter_frontiers_by_overlap(
             bad_idx_to_good_idx[i] = best_idx
 
     return sorted(indices_to_keep), bad_idx_to_good_idx
-
-
-def interpolate_line(points: np.ndarray) -> np.ndarray:
-    """
-    Interpolate a sequence of 2D pixel locations to create a continuous line.
-    Output has dtype int32, shape of (n, 2), and is in the same order as input.
-    """
-    if len(points) < 2:
-        return points
-
-    points = np.asarray(points)
-    diffs = np.diff(points, axis=0)
-
-    # Calculate required steps for each segment
-    max_steps = np.max(np.abs(diffs), axis=1)
-    steps = np.maximum(max_steps, 1)
-
-    # Initialize list to store interpolated segments
-    interpolated_points = []
-
-    # Interpolate each segment
-    for i in range(len(points) - 1):
-        curr_steps = int(steps[i])
-        segment_t = np.linspace(0, 1, curr_steps + 1).reshape(-1, 1)
-        segment = points[i] + segment_t * diffs[i]
-        interpolated_points.append(
-            segment[:-1]
-        )  # Exclude last point except for final segment
-
-    # Add the last point
-    interpolated_points.append(points[-1:])
-
-    return np.vstack(interpolated_points).astype(np.int32)
 
 
 def process_adjacent_columns(arr: np.ndarray) -> np.ndarray:
