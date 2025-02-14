@@ -27,7 +27,7 @@ def get_action(
     # segments
     all_seg_pts = np.vstack(dense_frontier_segments)
     dists = np.linalg.norm(all_seg_pts - camera_pos, axis=1)
-    within_dist = dists <= max_line_len
+    within_dist = dists < max_line_len * 0.98
     # Return None if no frontier segments are within the max line length
     if not within_dist.any():
         return None
@@ -35,7 +35,7 @@ def get_action(
     # 3. Compute the dot product between the camera and the ends of each frontier
     seg_ends = np.array([f_seg[[0, -1]] for f_seg in dense_frontier_segments])
     dot_prod = calculate_perpendicularity(camera_pos, seg_ends)  # shape: (S,)
-    is_visible = dot_prod < np.cos(np.radians(30))  # 30 degrees
+    is_visible = dot_prod < np.cos(np.radians(8))  # 8 degrees
     # Return None if no frontier segments are visible enough
     if not is_visible.any():
         return None
@@ -52,7 +52,7 @@ def get_action(
                 top_down_map=cropped_obstacle_map,
                 current_fog_of_war_mask=np.zeros_like(cropped_obstacle_map),
                 current_point=np.array([max_line_len, max_line_len]),
-                current_angle=camera_yaw + i * turn_angle,
+                current_angle=camera_yaw - i * turn_angle,
                 fov=fov,
                 max_line_len=max_line_len,
             ),
