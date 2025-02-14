@@ -108,13 +108,10 @@ class FrontierFilter:
                 self._fseg_to_best_frontier_score[
                     f_tuple
                 ] = self._f_scorer.get_best_frontier_score(f)
-            except IndexError as e:
-                map = top_down_map.astype(np.uint8) * 255
-                map = cv2.cvtColor(map, cv2.COLOR_GRAY2BGR)
-                for segment in curr_f_segments:
-                    map[segment[:, 0], segment[:, 1]] = (0, 0, 255)
-                cv2.imwrite("map_v2.png", map)
-                raise e
+            except IndexError:
+                self._fseg_to_best_frontier_score[
+                    f_tuple
+                ] = FrontierScore(timestep_id=self.call_count, score=-1)
 
         if len(curr_f_segments) == 1:
             # Just one frontier; no filtering needed, bad_idx_to_good_idx is empty
