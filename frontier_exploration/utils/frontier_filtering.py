@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
 import cv2
@@ -6,7 +6,11 @@ import numpy as np
 
 from frontier_exploration.utils.composite_fow import CompositeFOWMixin
 from frontier_exploration.utils.fog_of_war import reveal_fog_of_war
-from frontier_exploration.utils.general_utils import interpolate_line, wrap_heading
+from frontier_exploration.utils.general_utils import (
+    calculate_perpendicularity,
+    interpolate_line,
+    wrap_heading,
+)
 
 
 class CallCounter:
@@ -36,6 +40,55 @@ class FrontierScore:
     score: float
 
 
+@dataclass(frozen=True)
+class FrontierTimestepData:
+    good_indices_to_timestep: Dict[int, int] = field(default_factory=dict)
+    bad_idx_to_good_idx: Dict[int, int] = field(default_factory=dict)
+
+
+@dataclass
+class FrontierFilterData:
+    filtered: FrontierTimestepData = FrontierTimestepData()
+    unfiltered: FrontierTimestepData = FrontierTimestepData()
+    unscored_filtered: FrontierTimestepData = FrontierTimestepData()
+    unscored_unfiltered: FrontierTimestepData = FrontierTimestepData()
+
+    def set_single_frontier(self, timestep: int, unscored_timestep: int = -1) -> None:
+        self.filtered = FrontierTimestepData(good_indices_to_timestep={0: timestep})
+        self.unfiltered = FrontierTimestepData(good_indices_to_timestep={0: timestep})
+        if unscored_timestep != -1:
+            self.unscored_filtered = FrontierTimestepData(
+                good_indices_to_timestep={0: unscored_timestep}
+            )
+            self.unscored_unfiltered = FrontierTimestepData(
+                good_indices_to_timestep={0: unscored_timestep}
+            )
+
+    def verify(self) -> None:
+        if self.unfiltered.good_indices_to_timestep:
+            # Filtered should be a subset of unfiltered
+            assert all(
+                self.unfiltered.good_indices_to_timestep[k] == v
+                for k, v in self.filtered.good_indices_to_timestep.items()
+            )
+        if self.unscored_unfiltered.good_indices_to_timestep:
+            # Unscored filtered should be a subset of unscored unfiltered
+            assert all(
+                self.unscored_unfiltered.good_indices_to_timestep[k] == v
+                for k, v in self.unscored_filtered.good_indices_to_timestep.items()
+            )
+        for d in (
+            self.filtered,
+            self.unfiltered,
+            self.unscored_filtered,
+            self.unscored_unfiltered,
+        ):
+            # Ensure that the timesteps are all unique
+            assert len(set(d.good_indices_to_timestep.values())) == len(
+                d.good_indices_to_timestep
+            )
+
+
 class FrontierFilter:
     """
     Filters frontier segments based on field of view (FOV) and overlap criteria.
@@ -53,12 +106,16 @@ class FrontierFilter:
         self.__fov_length_px = fov_length_px
         self._f_scorer: FrontierScorer = FrontierScorer(fov, fov_length_px)
         self._fseg_to_best_frontier_score: Dict[Tuple[int, ...], FrontierScore] = {}
+        self._fseg_to_most_recent_timestep: Dict[Tuple[int, ...], int] = {}
+        self._camera_pose_to_timestep: Dict[Tuple[int, int, float], int] = {}
         self.call_count: int = 0
 
     def reset(self) -> None:
         """Resets the filter's internal state, clearing all stored images and scores."""
         self._f_scorer.reset()
         self._fseg_to_best_frontier_score = {}
+        self._fseg_to_most_recent_timestep = {}
+        self._camera_pose_to_timestep = {}
         self.call_count = 0
 
     @CallCounter
@@ -71,7 +128,8 @@ class FrontierFilter:
         curr_timestep_id: int,
         gt_idx: int = -1,
         filter: bool = True,
-    ) -> Tuple[Dict[int, int], Dict[int, int]]:
+        return_all: bool = False,
+    ) -> FrontierFilterData:
         assert (
             curr_timestep_id == self.call_count
         ), f"Expected timestep ID to be {self.call_count}, got {curr_timestep_id}"
@@ -96,47 +154,69 @@ class FrontierFilter:
 
         if len(curr_f_segments) == 0:
             # No segments; just bail after adding FOW to bank
-            return {}, {}
+            return result
 
         # 2. For each of the current frontiers, identify the timestep ID and score of
         # the best image from the bank
         curr_f_tuples = [tuple(f.flatten()) for f in curr_f_segments]
         for f, f_tuple in zip(curr_f_segments, curr_f_tuples):
             # Update the best image and score for this frontier segment
-            """DEBUG"""
             try:
                 self._fseg_to_best_frontier_score[
                     f_tuple
                 ] = self._f_scorer.get_best_frontier_score(f)
             except IndexError:
-                self._fseg_to_best_frontier_score[
-                    f_tuple
-                ] = FrontierScore(timestep_id=self.call_count, score=-1)
+                self._fseg_to_best_frontier_score[f_tuple] = FrontierScore(
+                    timestep_id=self.call_count, score=-1
+                )
+
+        if return_all:
+            # Determine the most recent timestep for each frontier
+            curr_pose = (
+                int(curr_cam_pos[0]),
+                int(curr_cam_pos[1]),
+                float(curr_cam_yaw),
+            )
+            if curr_pose not in self._camera_pose_to_timestep:
+                self._camera_pose_to_timestep[curr_pose] = curr_timestep_id
+            for f in curr_f_tuples:
+                if f not in self._fseg_to_most_recent_timestep:
+                    # New frontier updated by current timestep; update the most
+                    # recent timestep
+                    self._fseg_to_most_recent_timestep[
+                        f
+                    ] = self._camera_pose_to_timestep[curr_pose]
 
         if len(curr_f_segments) == 1:
             # Just one frontier; no filtering needed, bad_idx_to_good_idx is empty
-            return {
-                0: self._fseg_to_best_frontier_score[curr_f_tuples[0]].timestep_id
-            }, {}
+            unscored_timestep = self._fseg_to_most_recent_timestep.get(
+                curr_f_tuples[0], -1
+            )
+            result.set_single_frontier(curr_timestep_id, unscored_timestep)
+            return result
 
         # 3. Actual filtering occurs here; filter out frontiers that either have the
         # same or similar image as other frontiers with higher scores
-        if filter:
-            good_indices, bad_idx_to_good_idx = self._filter_frontiers_by_overlap(
-                curr_f_tuples, gt_idx
-            )
-        else:
+        if return_all or not filter:
             # Don't filter by overlap; however, should still filter out frontiers that
             # map to the same timestep as another frontier with a higher score
 
             # Create [(idx, f_score), ...] in descending order of f_score.score
-            f_scores = [self._fseg_to_best_frontier_score[f] for f in curr_f_tuples]
-            sorted_idx_and_f_scores = sorted(
-                list(enumerate(f_scores)), key=lambda x: x[1].score, reverse=True
-            )
-
-            bad_idx_to_good_idx: Dict[int, int] = {}
+            sorted_idx_and_f_scores: List[Tuple[int, FrontierScore]] = []
             timestep_to_best_idx: Dict[int, int] = {}
+            for idx, f in enumerate(curr_f_tuples):
+                if idx == gt_idx:
+                    timestep_to_best_idx[
+                        self._fseg_to_best_frontier_score[f].timestep_id
+                    ] = idx
+                else:
+                    sorted_idx_and_f_scores.append(
+                        (idx, self._fseg_to_best_frontier_score[f])
+                    )
+            sorted_idx_and_f_scores = sorted(
+                sorted_idx_and_f_scores, key=lambda x: x[1].score, reverse=True
+            )
+            bad_idx_to_good_idx: Dict[int, int] = {}
             for idx, f_score in sorted_idx_and_f_scores:
                 # Add current index to timestep_to_best_idx if none of the indices added
                 # so far share the same timestep as the current index
@@ -147,15 +227,80 @@ class FrontierFilter:
                     bad_idx_to_good_idx[idx] = timestep_to_best_idx[f_score.timestep_id]
 
             good_indices = list(timestep_to_best_idx.values())
+            good_indices_to_timestep = {
+                idx: self._fseg_to_best_frontier_score[curr_f_tuples[idx]].timestep_id
+                for idx in good_indices
+            }
+            result.unfiltered = FrontierTimestepData(
+                good_indices_to_timestep=good_indices_to_timestep,
+                bad_idx_to_good_idx=bad_idx_to_good_idx,
+            )
 
-        # 4. At this point, the frontiers within good_indices are high-scorers and do
-        # not appear similar to each other.
-        good_indices_to_timestep = {
-            idx: self._fseg_to_best_frontier_score[curr_f_tuples[idx]].timestep_id
-            for idx in good_indices
-        }
+        if return_all:
+            # Unscored and unfiltered
+            timestep_to_indices = {
+                self._fseg_to_most_recent_timestep[curr_f_tuples[gt_idx]]: gt_idx
+            }
+            bad_idx_to_good_idx = {}
+            for idx, f in enumerate(curr_f_tuples):
+                t_step = self._fseg_to_most_recent_timestep[f]
+                if t_step not in timestep_to_indices:
+                    timestep_to_indices[t_step] = idx
+                else:
+                    bad_idx_to_good_idx[idx] = timestep_to_indices[t_step]
+            good_indices = list(timestep_to_indices.values())
+            good_indices_to_timestep = {
+                idx: self._fseg_to_most_recent_timestep[curr_f_tuples[idx]]
+                for idx in good_indices
+            }
+            result.unscored_unfiltered = FrontierTimestepData(
+                good_indices_to_timestep=good_indices_to_timestep,
+                bad_idx_to_good_idx=bad_idx_to_good_idx,
+            )
 
-        return good_indices_to_timestep, bad_idx_to_good_idx
+        if return_all or filter:
+            good_indices, bad_idx_to_good_idx = self._filter_frontiers_by_overlap(
+                curr_f_tuples, gt_idx
+            )
+            good_indices_to_timestep = {
+                idx: self._fseg_to_best_frontier_score[curr_f_tuples[idx]].timestep_id
+                for idx in good_indices
+            }
+            result.filtered = FrontierTimestepData(
+                good_indices_to_timestep=good_indices_to_timestep,
+                bad_idx_to_good_idx=bad_idx_to_good_idx,
+            )
+
+        if return_all:
+            all_finfos = []
+            for idx, f in enumerate(curr_f_tuples):
+                t_step = self._fseg_to_most_recent_timestep[f]
+                yaw, mask = self._f_scorer.get_yaw_and_mask(t_step)
+                seg_ends = curr_f_segments[idx][[0, -1]].reshape(1, 2, 2)
+                score = 1 - calculate_perpendicularity(
+                    self._f_scorer.get_cam_pos(t_step), seg_ends
+                )
+                all_finfos.append(
+                    FrontierInfo(
+                        fow_yaw=yaw, single_fog_of_war=mask, score=score.item()
+                    )
+                )
+
+            good_indices, bad_idx_to_good_idx = filter_frontiers_by_overlap(
+                all_finfos, gt_idx
+            )
+            good_indices_to_timestep = {
+                idx: self._fseg_to_most_recent_timestep[curr_f_tuples[idx]]
+                for idx in good_indices
+            }
+            result.unscored_filtered = FrontierTimestepData(
+                good_indices_to_timestep=good_indices_to_timestep,
+                bad_idx_to_good_idx=bad_idx_to_good_idx,
+            )
+
+        result.verify()
+
+        return result
 
     def get_fog_of_war(self, timestep_id: int) -> np.ndarray:
         """
@@ -299,11 +444,20 @@ class FrontierScorer(CompositeFOWMixin):
            Tuple containing:
                - Camera yaw angle in radians
                - Binary mask representing the field of view
-
-        Raises:
-           AssertionError: If timestep_id doesn't match exactly one stored mask
         """
         return self._fow_yaws[timestep_id], self._fow_masks[timestep_id]
+
+    def get_cam_pos(self, timestep_id: int) -> np.ndarray:
+        """
+        Retrieves the camera position for a given timestep.
+
+        Args:
+           timestep_id: The timestep identifier to lookup
+
+        Returns:
+           Camera position as a numpy array
+        """
+        return self._fow_positions[timestep_id]
 
     def get_best_frontier_score(self, frontier_segment: np.ndarray) -> FrontierScore:
         """

@@ -130,3 +130,34 @@ def interpolate_line(points: np.ndarray) -> np.ndarray:
     interpolated_points.append(points[-1:])
 
     return np.vstack(interpolated_points).astype(np.int32)
+
+
+def calculate_perpendicularity(p1: np.ndarray, line_pairs: np.ndarray) -> np.ndarray:
+    """
+    Calculate how perpendicular multiple line pairs are to a point.
+
+    Parameters:
+    p1: np.array([x, y]) - The standalone point
+    line_pairs: np.array([[x1, y1], [x2, y2]]) shape (N,2,2) - Array of line pairs
+                where each pair consists of two points
+
+    Returns:
+    np.array shape (N,) - Array of perpendicularity scores
+        0 means perfectly perpendicular, 1 means parallel
+    """
+    # Calculate midpoints for all line pairs at once
+    midpoints = line_pairs.mean(axis=1)  # Shape: (N,2)
+
+    # Calculate direction vectors for all line pairs
+    v1 = line_pairs[:, 1] - line_pairs[:, 0]  # Shape: (N,2)
+    v2 = midpoints - p1  # Shape: (N,2)
+
+    # Calculate dot products for all pairs
+    dot_products = np.sum(v1 * v2, axis=1)  # Shape: (N,)
+
+    # Calculate norms
+    v1_norms = np.linalg.norm(v1, axis=1)  # Shape: (N,)
+    v2_norms = np.linalg.norm(v2, axis=1)  # Shape: (N,)
+
+    # Return normalized absolute dot products
+    return np.abs(dot_products / (v1_norms * v2_norms))

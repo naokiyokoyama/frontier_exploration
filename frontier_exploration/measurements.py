@@ -123,7 +123,7 @@ class FrontierExplorationMap(TopDownMap):
             ]
         )
         scene_id = os.path.basename(episode.scene_id).split(".")[0]
-        print(f"Starting episode {episode.episode_id} in {scene_id}...")
+        print(f"\n\n\nStarting episode {episode.episode_id} in {scene_id}...\n\n\n")
 
     def update_fog_of_war_mask(self, *args, **kwargs):
         self._fog_of_war_mask = self._explorer_sensor.fog_of_war_mask.copy()

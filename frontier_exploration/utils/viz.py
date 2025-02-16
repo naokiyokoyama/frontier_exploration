@@ -400,7 +400,7 @@ def resize_image_maintain_ratio(
         new_height = int(height * scale_factor)
 
     resized_image = cv2.resize(
-        image, (new_width, new_height), interpolation=interpolation
+        image.astype(np.uint8), (new_width, new_height), interpolation=interpolation
     )
 
     return resized_image, scale_factor

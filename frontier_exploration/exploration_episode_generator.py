@@ -25,7 +25,10 @@ from frontier_exploration.target_explorer import (
     TargetExplorerSensorConfig,
 )
 from frontier_exploration.utils.fog_of_war import reveal_fog_of_war
-from frontier_exploration.utils.frontier_filtering import FrontierFilter
+from frontier_exploration.utils.frontier_filtering import (
+    FrontierFilter,
+    FrontierFilterData,
+)
 from frontier_exploration.utils.general_utils import images_to_video, wrap_heading
 from frontier_exploration.utils.path_utils import get_path
 from frontier_exploration.utils.viz import (
@@ -172,10 +175,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
     def _record_frontiers(self) -> None:
         gt_idx = self.greedy_frontier_idx if len(self._frontier_segments) > 0 else -1
 
-        (
-            good_indices_to_timestep,
-            self._bad_idx_to_good_idx,
-        ) = self.frontier_filter.score_and_filter_frontiers(
+        result: FrontierFilterData = self.frontier_filter.score_and_filter_frontiers(
             curr_f_segments=self._frontier_segments,
             curr_cam_pos=self._get_agent_pixel_coords(),
             curr_cam_yaw=self.agent_heading,
@@ -183,18 +183,32 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             curr_timestep_id=self._step_count,
             gt_idx=gt_idx,
             filter=True,
+            return_all=True,
         )
 
-        correct_frontier = (
-            good_indices_to_timestep[gt_idx] if good_indices_to_timestep else -1
-        )
+        correct_frontier, correct_frontier_unscored = [
+            i.good_indices_to_timestep[gt_idx]
+            if len(self._frontier_segments) > 0
+            else -1
+            for i in (result.filtered, result.unscored_filtered)
+        ]
 
         self._gt_traj.append(
             GTTrajectoryState(
                 timestep_id=self._step_count,
                 rgb=self._sim.get_observations_at()["rgb"],
-                all_frontiers=list(set(good_indices_to_timestep.values())),
+                all_frontiers=list(result.filtered.good_indices_to_timestep.values()),
+                all_frontiers_unfiltered=list(
+                    set(result.unfiltered.good_indices_to_timestep.values())
+                ),
+                all_frontiers_unscored=list(
+                    result.unscored_filtered.good_indices_to_timestep.values()
+                ),
+                all_frontiers_unscored_unfiltered=list(
+                    result.unscored_unfiltered.good_indices_to_timestep.values()
+                ),
                 correct_frontier=correct_frontier,
+                correct_frontier_unscored=correct_frontier_unscored,
                 single_fog_of_war=self._latest_fog,
             )
         )
@@ -446,7 +460,11 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         used_frontier_timesteps = np.sort(
             np.unique(
                 np.array(
-                    [i for v in list(frontiers.values()) for i in v["all_frontiers"]]
+                    [
+                        i
+                        for v in list(frontiers.values())
+                        for i in v["all_frontiers_unfiltered"]
+                    ]
                 )
             )
         ).tolist()
@@ -863,13 +881,23 @@ class GTTrajectoryState:
     timestep_id: int
     rgb: np.ndarray
     all_frontiers: List[int]
+    all_frontiers_unfiltered: List[int]
+    all_frontiers_unscored: List[int]
+    all_frontiers_unscored_unfiltered: List[int]
     correct_frontier: int
+    correct_frontier_unscored: int
     single_fog_of_war: np.ndarray
 
     def to_frontier_dict(self) -> Dict:
         return {
             "all_frontiers": [int(i) for i in self.all_frontiers],
+            "all_frontiers_unfiltered": [int(i) for i in self.all_frontiers_unfiltered],
+            "all_frontiers_unscored": [int(i) for i in self.all_frontiers_unscored],
+            "all_frontiers_unscored_unfiltered": [
+                int(i) for i in self.all_frontiers_unscored_unfiltered
+            ],
             "correct_frontier": int(self.correct_frontier),
+            "correct_frontier_unscored": int(self.correct_frontier_unscored),
         }
 
 
