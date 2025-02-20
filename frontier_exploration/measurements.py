@@ -77,6 +77,8 @@ class FrontierExplorationMap(TopDownMap):
         import os
 
         if "ZSOS_LOG_DIR" in os.environ:
+            from pathlib import Path
+
             from vlfm.utils.log_saver import is_evaluated
 
             scene_id = os.path.basename(episode.scene_id).split(".")[0]
@@ -91,8 +93,6 @@ class FrontierExplorationMap(TopDownMap):
                 log_dir = os.environ["ZSOS_LOG_DIR"]
                 base = f"{episode.episode_id}_{scene_id}.json"
                 filename = os.path.join(log_dir, base)
-
-                from pathlib import Path
 
                 path = Path(filename)
                 try:
@@ -183,6 +183,7 @@ class FrontierExplorationMap(TopDownMap):
         #     self._task._is_episode_active = False
 
         import os
+        from pathlib import Path
 
         if "ZSOS_LOG_DIR" in os.environ:
             from vlfm.utils.log_saver import is_evaluated
@@ -201,11 +202,13 @@ class FrontierExplorationMap(TopDownMap):
                 base = f"{episode.episode_id}_{scene_id}.json"
                 filename = os.path.join(log_dir, base)
 
-                from pathlib import Path
-
                 path = Path(filename)
                 if path.exists():
                     path.touch()
+
+            if "SLURM_JOBID" in os.environ:
+                path = Path(f"/tmp/zsos_{os.environ['SLURM_JOBID']}.dummy")
+                path.touch()
 
         # Update self._metric with the static metrics
         self._metric.update(self._static_metrics)
@@ -240,9 +243,9 @@ class FrontierExplorationMap(TopDownMap):
 
         # Compute contours that contain MAP_VALID_POINT and/or MAP_VIEW_POINT_INDICATOR
         valid_with_viewpoints = self._top_down_map.copy()
-        valid_with_viewpoints[valid_with_viewpoints == MAP_VIEW_POINT_INDICATOR] = (
-            MAP_VALID_POINT
-        )
+        valid_with_viewpoints[
+            valid_with_viewpoints == MAP_VIEW_POINT_INDICATOR
+        ] = MAP_VALID_POINT
         # Dilate valid_with_viewpoints by 2 pixels to ensure that the contour is not
         # broken by pinching obstacles
         valid_with_viewpoints = cv2.dilate(
