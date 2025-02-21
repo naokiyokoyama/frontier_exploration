@@ -43,10 +43,10 @@ class TargetExplorer(BaseExplorer):
         self._beeline_target: np.ndarray = np.full(3, np.nan)
         self._closest_goal: np.ndarray = np.full(3, np.nan)
         self._should_update_closest_frontier: bool = True
-        self._valid_goals = np.array([])
-        self._valid_path = None
+        self._valid_goals: np.ndarray = np.array([])
+        self._valid_path: Optional[habitat_sim.MultiGoalShortestPath] = None
         self._previous_path_start: np.ndarray = np.full(3, np.nan)
-        self.greedy_waypoint_idx: int | None = None
+        self.greedy_waypoint_idx: Optional[int] = None
 
     def _reset(self, episode) -> None:
         super()._reset(episode)
