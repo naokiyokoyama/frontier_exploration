@@ -1,4 +1,5 @@
 import frontier_exploration  # noqa
+import ovon  # noqa
 import hydra  # noqa
 from habitat import get_config  # noqa
 from habitat.config.default import patch_config

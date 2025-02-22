@@ -10,7 +10,6 @@ defaults:
     - frontier_exploration_map
     - collisions
   - override /habitat/task/lab_sensors:
-    - objectgoal_sensor
     - compass_sensor
     - gps_sensor
     - exploration_episode_generator
@@ -25,11 +24,58 @@ habitat:
   task:
     success_reward: 2.5
     slack_reward: -1e-3
+    measurements:
+      distance_to_goal:
+        type: OVONDistanceToGoal
+        distance_to: VIEW_POINTS
+  dataset:
+    type: OVON-v1
   simulator:
     habitat_sim_v0:
       allow_sliding: True
     forward_step_size: 0.5
     turn_angle: 30
+    type: OVONSim-v0
+    agents:
+      main_agent:
+        height: 1.41
+        radius: 0.17
+        sim_sensors:
+          rgb_sensor:
+            type: HabitatSimRGBSensor
+            height: 640
+            width: 360
+            position:
+              - 0.0
+              - 1.31
+              - 0.0
+            orientation:
+              - 0.0
+              - 0.0
+              - 0.0
+            hfov: 42
+            sensor_subtype: PINHOLE
+            noise_model: None
+            noise_model_kwargs: { }
+          depth_sensor:
+            type: HabitatSimDepthSensor
+            height: 640
+            width: 360
+            position:
+              - 0.0
+              - 1.31
+              - 0.0
+            orientation:
+              - 0.0
+              - 0.0
+              - 0.0
+            hfov: 42
+            sensor_subtype: PINHOLE
+            noise_model: None
+            noise_model_kwargs: { }
+            min_depth: 0.5
+            max_depth: 5.0
+            normalize_depth: true
 
 habitat_baselines:
   torch_gpu_id: 0
