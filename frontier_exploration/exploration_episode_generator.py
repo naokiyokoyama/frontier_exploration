@@ -12,8 +12,8 @@ import cv2
 import numpy as np
 import quaternion as qt
 from habitat import EmbodiedTask, registry
-from habitat.core.dataset import Episode
 from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
+from habitat.tasks.nav.nav import NavigationEpisode
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig
 
@@ -121,7 +121,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         self._bad_episode: bool = False
         self._viz_imgs: list[np.ndarray] = []
 
-    def _reset(self, episode: Episode) -> None:
+    def _reset(self, episode: NavigationEpisode) -> None:
         super()._reset(episode)
 
         self._visibility_dist = self._config.visibility_dist
@@ -215,14 +215,14 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         assert len(self._gt_traj) - 1 == self._step_count
 
-    def _generate_imagenav_goal(self, episode: Episode) -> np.ndarray:
+    def _generate_imagenav_goal(self, episode: NavigationEpisode) -> np.ndarray:
         """
         Generates an image taken at the goal point for ImageNav tasks. The yaw of the
         agent when the image is taken is selected such that at least 50% of the agent's
         FOV is unobstructed. This is to avoid image goals that are too close to walls.
 
         Args:
-            episode (Episode): The current episode.
+            episode (NavigationEpisode): The current episode.
 
         Returns:
             np.ndarray: The RGB image of the goal.
@@ -365,7 +365,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
                 # set threshold
                 if self.check_explored_overlap():
                     self._state = State.BEELINE
-                    self._beeline_target = self._episode._shortest_path_cache.points[-1]
+                    self._beeline_target = self._valid_path.points[-1]
 
         return updated
 
@@ -402,6 +402,9 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         Returns:
             bool: True if the exploration was successfully reset, False otherwise.
         """
+        if not self._gt_traj:
+            return False
+
         self._area_thresh = self._config.exploration_area_thresh
         self._visibility_dist = self._config.exploration_visibility_dist
 
