@@ -1,5 +1,4 @@
 import frontier_exploration  # noqa
-import ovon  # noqa
 import hydra  # noqa
 from habitat import get_config  # noqa
 from habitat.config.default import patch_config
@@ -17,6 +16,8 @@ class HabitatConfigPlugin(SearchPathPlugin):
 
 register_hydra_plugin(HabitatConfigPlugin)
 
+OVON = False
+
 
 @hydra.main(
     version_base=None,
@@ -24,6 +25,12 @@ register_hydra_plugin(HabitatConfigPlugin)
     config_name="exp_objnav",
 )
 def main(cfg: DictConfig) -> None:
+    global OVON
+    if "OVON" in cfg.habitat.dataset.type and not OVON:
+        import ovon  # noqa
+
+        OVON = True
+        return main(cfg)
     cfg = patch_config(cfg)
     execute_exp(cfg, "eval")
 
