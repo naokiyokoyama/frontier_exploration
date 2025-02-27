@@ -25,17 +25,24 @@ OVON = False
     config_name="exp_objnav",
 )
 def main(cfg: DictConfig) -> None:
-    global OVON
-    if "OVON" in cfg.habitat.dataset.type and not OVON:
-        import ovon  # noqa
-
-        OVON = True
-        return main(cfg)
     cfg = patch_config(cfg)
     execute_exp(cfg, "eval")
 
 
+@hydra.main(
+    version_base=None,
+    config_path="../",
+    config_name="exp_objnav",
+)
+def check_ovon(cfg: DictConfig) -> None:
+    global OVON
+    if "OVON" in cfg.habitat.dataset.type:
+        OVON = True
+
 if __name__ == "__main__":
+    check_ovon()
+    if OVON:
+        import ovon  # noqa
     main()
 """
 Sample command:
