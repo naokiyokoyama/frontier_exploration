@@ -152,6 +152,8 @@ class FrontierFilter:
             timestep_id=curr_timestep_id,
         )
 
+        result = FrontierFilterData()
+
         if len(curr_f_segments) == 0:
             # No segments; just bail after adding FOW to bank
             return result
