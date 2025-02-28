@@ -141,13 +141,13 @@ class BaseExplorer(Sensor):
         return curr_pose
 
     @property
-    def agent_position(self):
+    def agent_position(self) -> np.ndarray:
         if self._agent_position is None:
             self._agent_position = self._sim.get_agent_state().position
         return self._agent_position
 
     @property
-    def agent_heading(self):
+    def agent_heading(self) -> float:
         if self._agent_heading is None:
             self._agent_heading = get_polar_angle(self._sim.get_agent_state().rotation)
         return self._agent_heading

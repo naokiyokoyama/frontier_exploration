@@ -5,8 +5,9 @@ import json
 import os
 import os.path as osp
 import traceback
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import cv2
 import numpy as np
@@ -193,9 +194,11 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             for i in (result.filtered, result.unscored_filtered)
         ]
 
+        pose = tuple(float(i) for i in (*self.agent_position, self.agent_heading))
         self._gt_traj.append(
             GTTrajectoryState(
                 timestep_id=self._step_count,
+                pose=pose,  # noqa
                 rgb=self._sim.get_observations_at()["rgb"],
                 all_frontiers=list(result.filtered.good_indices_to_timestep.values()),
                 all_frontiers_unfiltered=list(
@@ -455,27 +458,15 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         os.makedirs(self._episode_dir, exist_ok=True)
 
-        frontiers = {
-            s.timestep_id: s.to_frontier_dict()
-            for s in self._gt_traj
-            if len(s.all_frontiers) > 1
-        }
-        used_frontier_timesteps = np.sort(
-            np.unique(
-                np.array(
-                    [
-                        i
-                        for v in list(frontiers.values())
-                        for i in v["all_frontiers_unfiltered"]
-                    ]
-                )
-            )
-        ).tolist()
+        frontiers = get_frontier_sets(self._gt_traj)
+        if "all_frontiers" not in frontiers:
+            # No frontier sets with enough frontiers were found
+            return
 
         self._save_rgbs_to_video(
             [i.rgb for i in self._gt_traj], osp.join(self._episode_dir, "gt_traj.mp4")
         )
-        self._save_frontier_fogs(used_frontier_timesteps, self._episode_dir)
+        self._save_frontier_fogs(self._episode_dir)
         if self._task_type == "imagenav":
             self._save_imagenav_goal(self._episode_dir)
 
@@ -521,9 +512,9 @@ class ExplorationEpisodeGenerator(TargetExplorer):
     def _save_exploration_fogs(self, dir_path: str) -> None:
         self._save_fogs(self._exploration_fogs, dir_path, "exploration")
 
-    def _save_frontier_fogs(self, valid_timesteps: List[int], dir_path: str) -> None:
+    def _save_frontier_fogs(self, dir_path: str) -> None:
         self._save_fogs(
-            [self._gt_traj[i].single_fog_of_war for i in valid_timesteps],
+            [i.single_fog_of_war for i in self._gt_traj],
             dir_path,
             "frontiers",
         )
@@ -550,7 +541,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         Saves the episode information to a JSON file.
 
         Args:
-            frontiers (Dict): Dictionary mapping timestep ids to frontier information.
+            frontiers (Dict): Dictionary representing the frontier sets.
             exploration_imgs_dir (str): The path to the directory to save the
                 exploration
             episode_json (str): The path to the JSON file to save the episode
@@ -564,8 +555,8 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             "episode_id": self._episode.episode_id,
             "scene_id": self._scene_id,
             "exploration_id": int(osp.basename(exploration_imgs_dir).split("_")[-1]),
-            "timestep_to_frontiers": frontiers,
             "exploration_poses": self._exploration_poses,
+            **frontiers,
         }
 
         if self._task_type == "objectnav":
@@ -882,6 +873,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 @dataclass(frozen=True)
 class GTTrajectoryState:
     timestep_id: int
+    pose: Tuple[float, float, float, float]
     rgb: np.ndarray
     all_frontiers: List[int]
     all_frontiers_unfiltered: List[int]
@@ -902,6 +894,68 @@ class GTTrajectoryState:
             "correct_frontier": int(self.correct_frontier),
             "correct_frontier_unscored": int(self.correct_frontier_unscored),
         }
+
+
+def get_frontier_sets(
+    trajectory: List[GTTrajectoryState],
+) -> Dict[str, Dict[str, List[int]]]:
+    """
+    Organizes trajectory states into sets of frontier options grouped by their
+    configurations.
+
+    This function processes a trajectory of robot states and groups timesteps with
+    identical frontier selection options. It handles deduplication of frontier IDs when
+    the robot revisits the same pose, ensuring that learning examples with identical
+    decision points are properly grouped together.
+
+    Args:
+        trajectory: A list of GTTrajectoryState objects representing the robot's
+                   exploration trajectory with frontier information at each timestep.
+
+    Returns:
+        A nested dictionary with the following structure:
+        - First level keys are frontier types ("all_frontiers",
+          "all_frontiers_unfiltered", etc.)
+        - Second level keys are strings of format "correct_id|id1,id2,..." representing:
+          * The correct frontier ID, followed by
+          * A comma-separated list of all available frontier IDs at that configuration
+        - Values are lists of timestep IDs that share the same frontier configuration
+    """
+    sets_to_timestep: Dict[str, Dict[str, List[int]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    set_keys = [
+        "all_frontiers",
+        "all_frontiers_unfiltered",
+        "all_frontiers_unscored",
+        "all_frontiers_unscored_unfiltered",
+    ]
+    pose_to_first_timestep: Dict[Tuple[float, float, float, float], int] = {}
+    raw_timestep_to_first_timestep: Dict[int, int] = {}
+    for state in trajectory:
+        frontier_dict = state.to_frontier_dict()
+        if state.pose not in pose_to_first_timestep:
+            pose_to_first_timestep[state.pose] = state.timestep_id
+        else:
+            raw_timestep_to_first_timestep[state.timestep_id] = pose_to_first_timestep[
+                state.pose
+            ]
+        for k in set_keys:
+            correct_key = "_unscored" if "unscored" in k else ""
+            correct_id = frontier_dict[f"correct_frontier{correct_key}"]
+            correct_id = raw_timestep_to_first_timestep.get(correct_id, correct_id)
+            deduped_choice_ids = sorted(
+                [
+                    str(raw_timestep_to_first_timestep.get(i, i))
+                    for i in frontier_dict[k]
+                ]
+            )
+            if len(deduped_choice_ids) < 2:
+                continue
+            set_string = f"{correct_id}|{','.join(deduped_choice_ids)}"
+            sets_to_timestep[k][set_string].append(state.timestep_id)
+
+    return sets_to_timestep
 
 
 @dataclass

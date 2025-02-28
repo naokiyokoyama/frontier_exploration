@@ -238,28 +238,6 @@ class FrontierFilter:
                 bad_idx_to_good_idx=bad_idx_to_good_idx,
             )
 
-        if return_all:
-            # Unscored and unfiltered
-            timestep_to_indices = {
-                self._fseg_to_most_recent_timestep[curr_f_tuples[gt_idx]]: gt_idx
-            }
-            bad_idx_to_good_idx = {}
-            for idx, f in enumerate(curr_f_tuples):
-                t_step = self._fseg_to_most_recent_timestep[f]
-                if t_step not in timestep_to_indices:
-                    timestep_to_indices[t_step] = idx
-                else:
-                    bad_idx_to_good_idx[idx] = timestep_to_indices[t_step]
-            good_indices = list(timestep_to_indices.values())
-            good_indices_to_timestep = {
-                idx: self._fseg_to_most_recent_timestep[curr_f_tuples[idx]]
-                for idx in good_indices
-            }
-            result.unscored_unfiltered = FrontierTimestepData(
-                good_indices_to_timestep=good_indices_to_timestep,
-                bad_idx_to_good_idx=bad_idx_to_good_idx,
-            )
-
         if return_all or filter:
             good_indices, bad_idx_to_good_idx = self._filter_frontiers_by_overlap(
                 curr_f_tuples, gt_idx
@@ -274,6 +252,7 @@ class FrontierFilter:
             )
 
         if return_all:
+            # Unscored and filtered
             all_finfos = []
             for idx, f in enumerate(curr_f_tuples):
                 t_step = self._fseg_to_most_recent_timestep[f]
@@ -296,6 +275,30 @@ class FrontierFilter:
                 for idx in good_indices
             }
             result.unscored_filtered = FrontierTimestepData(
+                good_indices_to_timestep=good_indices_to_timestep,
+                bad_idx_to_good_idx=bad_idx_to_good_idx,
+            )
+
+            # Unscored and unfiltered
+            timestep_to_indices = {
+                self._fseg_to_most_recent_timestep[curr_f_tuples[i]]: i
+                for i in good_indices
+            }
+            assert len(timestep_to_indices) == len(good_indices)
+            bad_idx_to_good_idx = {}
+            for idx, f in enumerate(curr_f_tuples):
+                if idx in good_indices:
+                    continue
+                t_step = self._fseg_to_most_recent_timestep[f]
+                if t_step not in timestep_to_indices:
+                    timestep_to_indices[t_step] = idx
+                else:
+                    bad_idx_to_good_idx[idx] = timestep_to_indices[t_step]
+            good_indices_to_timestep = {
+                i: self._fseg_to_most_recent_timestep[curr_f_tuples[i]]
+                for i in good_indices
+            }
+            result.unscored_unfiltered = FrontierTimestepData(
                 good_indices_to_timestep=good_indices_to_timestep,
                 bad_idx_to_good_idx=bad_idx_to_good_idx,
             )
