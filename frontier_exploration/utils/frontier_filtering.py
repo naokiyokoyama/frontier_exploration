@@ -194,7 +194,10 @@ class FrontierFilter:
             unscored_timestep = self._fseg_to_most_recent_timestep.get(
                 curr_f_tuples[0], -1
             )
-            result.set_single_frontier(curr_timestep_id, unscored_timestep)
+            scored_timestep = self._fseg_to_best_frontier_score.get(
+                curr_f_tuples[0], -1
+            ).timestep_id
+            result.set_single_frontier(scored_timestep, unscored_timestep)
             return result
 
         # 3. Actual filtering occurs here; filter out frontiers that either have the
