@@ -6,10 +6,11 @@ import os
 import os.path as osp
 import traceback
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple
 
 import cv2
+import habitat_sim
 import numpy as np
 import quaternion as qt
 from habitat import EmbodiedTask, registry
@@ -24,13 +25,18 @@ from frontier_exploration.target_explorer import (
     State,
     TargetExplorer,
     TargetExplorerSensorConfig,
+    TargetFrontierException,
 )
 from frontier_exploration.utils.fog_of_war import reveal_fog_of_war
 from frontier_exploration.utils.frontier_filtering import (
     FrontierFilter,
     FrontierFilterData,
 )
-from frontier_exploration.utils.general_utils import images_to_video, wrap_heading
+from frontier_exploration.utils.general_utils import (
+    images_to_video,
+    interpolate_path,
+    wrap_heading,
+)
 from frontier_exploration.utils.path_utils import get_path
 from frontier_exploration.utils.viz import (
     add_text_to_image,
@@ -49,11 +55,13 @@ EXPLORATION_THRESHOLD = 0.1
 def default_on_exception(default_value):
     def decorator(func):
         def wrapper(*args, **kwargs):
-            if os.environ.get("EXP_DEBUG") == "1":
-                return func(*args, **kwargs)
             try:
                 return func(*args, **kwargs)
             except Exception as e:
+                if os.environ.get("EXP_DEBUG") == "1" and not isinstance(
+                    e, TargetFrontierException
+                ):
+                    raise e
                 print(f"Exception occurred: {e}")
                 if os.environ.get("NO_TRACEBACK") != "1":
                     print("Full traceback:")
@@ -122,6 +130,16 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         self._bad_episode: bool = False
         self._viz_imgs: list[np.ndarray] = []
 
+        self._f_seg_to_3d = {}
+        self._previous_f_segs = {}
+        self._f_seg_index_to_f_dist = defaultdict(dict)
+        self._f_goal_distance_cache = defaultdict(dict)
+        self._agent_distance_cache = defaultdict(dict)
+        self._f_seg_pose_to_goal_paths = defaultdict(dict)
+        self._all_frontier_paths: List[
+            Tuple[habitat_sim.MultiGoalShortestPath, habitat_sim.ShortestPath]
+        ] = []
+
     def _reset(self, episode: NavigationEpisode) -> None:
         super()._reset(episode)
 
@@ -143,6 +161,14 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         self._coverage_masks = []
         self._step_count = 0
         self._timestep_to_greedy_idx = {}
+
+        self._f_seg_to_3d = {}
+        self._previous_f_segs = {}
+        self._f_seg_index_to_f_dist = defaultdict(dict)
+        self._f_goal_distance_cache = defaultdict(dict)
+        self._agent_distance_cache = defaultdict(dict)
+        self._f_seg_pose_to_goal_paths = defaultdict(dict)
+        self._all_frontier_paths = []
 
         self._viz_imgs = []
 
@@ -187,12 +213,29 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             return_all=True,
         )
 
+        self._bad_idx_to_good_idx = result.filtered.bad_idx_to_good_idx
+
         correct_frontier, correct_frontier_unscored = [
             i.good_indices_to_timestep[gt_idx]
             if len(self._frontier_segments) > 0
             else -1
             for i in (result.filtered, result.unscored_filtered)
         ]
+
+        self._all_frontier_paths = self._get_frontier_dtgs()
+        all_frontier_dtgs = [
+            i.geodesic_distance + j.geodesic_distance
+            for i, j in self._all_frontier_paths
+        ]
+        frontier_dtgs = {}
+        for k, ftd in (
+            ("dtgs", result.unfiltered),
+            ("dtgs_unscored", result.unscored_unfiltered),
+        ):
+            frontier_dtgs[k] = {
+                timestep: all_frontier_dtgs[idx]
+                for idx, timestep in ftd.good_indices_to_timestep.items()
+            }
 
         pose = tuple(float(i) for i in (*self.agent_position, self.agent_heading))
         self._gt_traj.append(
@@ -213,10 +256,131 @@ class ExplorationEpisodeGenerator(TargetExplorer):
                 correct_frontier=correct_frontier,
                 correct_frontier_unscored=correct_frontier_unscored,
                 single_fog_of_war=self._latest_fog,
+                distance_to_goal=self._valid_path.geodesic_distance,
+                frontier_dtgs=frontier_dtgs,
             )
         )
 
         assert len(self._gt_traj) - 1 == self._step_count
+
+    def _get_frontier_dtgs(
+        self,
+    ) -> List[Tuple[habitat_sim.MultiGoalShortestPath, habitat_sim.ShortestPath]]:
+        if len(self._frontier_segments) == 0:
+            return []
+
+        goal_paths: List[
+            Tuple[habitat_sim.MultiGoalShortestPath, habitat_sim.ShortestPath]
+        ] = []
+        pose_key = tuple(map(float, self.agent_position.tolist()))
+        all_f_seg_keys = [tuple(f_seg.flatten()) for f_seg in self._frontier_segments]
+        all_pt_keys = []
+        for f_seg, f_seg_key in zip(self._frontier_segments, all_f_seg_keys):
+            # If the minimum distance to the frontier has already been calculated, use
+            # that value
+            if pose_key in self._f_seg_pose_to_goal_paths[f_seg_key]:
+                goal_paths.append(self._f_seg_pose_to_goal_paths[f_seg_key][pose_key])
+                continue
+
+            # If we already interpolated the frontier segment, use that
+            if f_seg_key in self._f_seg_to_3d:
+                f_seg_3d = self._f_seg_to_3d[f_seg_key]
+            else:
+                f_seg_3d = interpolate_path(
+                    np.array([self._pixel_to_map_coors(i) for i in f_seg]), max_dist=0.3
+                )
+                self._f_seg_to_3d[f_seg_key] = f_seg_3d
+
+            # See if the point on the frontier closest to the agent has changed
+            agent_to_frontier = habitat_sim.MultiGoalShortestPath()
+            agent_to_frontier.requested_ends = f_seg_3d
+            agent_to_frontier.requested_start = self.agent_position
+            path_found = self._sim.pathfinder.find_path(agent_to_frontier)
+            assert path_found
+            closest_idx = agent_to_frontier.closest_end_point_index
+
+            # If it hasn't changed, then use the previously calculated minimum
+            # distance between the frontier and the goals
+            if closest_idx in self._f_seg_index_to_f_dist[f_seg_key]:
+                frontier_to_goal, f_pt = self._f_seg_index_to_f_dist[f_seg_key][
+                    closest_idx
+                ]
+                agent_to_frontier_goal = habitat_sim.ShortestPath()
+                agent_to_frontier_goal.requested_start = self.agent_position
+                agent_to_frontier_goal.requested_end = f_pt
+                assert self._sim.pathfinder.find_path(agent_to_frontier_goal)
+                goal_paths.append((frontier_to_goal, agent_to_frontier_goal))
+                self._f_seg_pose_to_goal_paths[f_seg_key][pose_key] = (
+                    frontier_to_goal,
+                    agent_to_frontier_goal,
+                )
+                assert len(agent_to_frontier_goal.points) > 0
+                continue
+
+            min_dist = np.inf
+            best_paths = None
+            for pt in f_seg_3d:
+                # Get or compute path to goals
+                pt_key = tuple(pt)
+                all_pt_keys.append(pt_key)
+                valid_goals_key = tuple(self._valid_goals.flatten())
+                if valid_goals_key in self._f_goal_distance_cache[pt_key]:
+                    frontier_to_goal = self._f_goal_distance_cache[pt_key][
+                        valid_goals_key
+                    ]
+                else:
+                    frontier_to_goal = habitat_sim.MultiGoalShortestPath()
+                    frontier_to_goal.requested_start = pt
+                    frontier_to_goal.requested_ends = self._valid_goals
+                    self._sim.pathfinder.find_path(frontier_to_goal)
+                    self._f_goal_distance_cache[pt_key][
+                        valid_goals_key
+                    ] = frontier_to_goal
+
+                if pose_key in self._agent_distance_cache[pt_key]:
+                    agent_to_frontier_goal = self._agent_distance_cache[pt_key][
+                        pose_key
+                    ]
+                else:
+                    agent_to_frontier_goal = habitat_sim.ShortestPath()
+                    agent_to_frontier_goal.requested_start = self.agent_position
+                    agent_to_frontier_goal.requested_end = pt
+                    self._sim.pathfinder.find_path(agent_to_frontier_goal)
+                    self._agent_distance_cache[pt_key][
+                        pose_key
+                    ] = agent_to_frontier_goal
+
+                total_dist = (
+                    frontier_to_goal.geodesic_distance
+                    + agent_to_frontier_goal.geodesic_distance
+                )
+                if total_dist < min_dist:
+                    min_dist = total_dist
+                    self._f_seg_index_to_f_dist[f_seg_key][closest_idx] = (
+                        frontier_to_goal,
+                        pt,
+                    )
+                    best_paths = (frontier_to_goal, agent_to_frontier_goal)
+
+            assert best_paths is not None
+            goal_paths.append(best_paths)
+            assert len(best_paths[1].points) > 0
+            self._f_seg_pose_to_goal_paths[f_seg_key][pose_key] = best_paths
+
+        self._f_seg_pose_to_goal_paths = defaultdict(
+            dict, {k: self._f_seg_pose_to_goal_paths[k] for k in all_f_seg_keys}
+        )
+        self._f_seg_to_3d = defaultdict(
+            dict, {k: self._f_seg_to_3d[k] for k in all_f_seg_keys}
+        )
+        self._f_seg_index_to_f_dist = defaultdict(
+            dict, {k: self._f_seg_index_to_f_dist[k] for k in all_f_seg_keys}
+        )
+        self._f_goal_distance_cache = defaultdict(
+            dict, {k: self._f_goal_distance_cache[k] for k in all_pt_keys}
+        )
+
+        return goal_paths
 
     def _generate_imagenav_goal(self, episode: NavigationEpisode) -> np.ndarray:
         """
@@ -556,6 +720,8 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             "scene_id": self._scene_id,
             "exploration_id": int(osp.basename(exploration_imgs_dir).split("_")[-1]),
             "exploration_poses": self._exploration_poses,
+            "distance_to_goal": [s.distance_to_goal for s in self._gt_traj],
+            "frontier_dtgs": [s.frontier_dtgs for s in self._gt_traj],
             **frontiers,
         }
 
@@ -686,7 +852,10 @@ class ExplorationEpisodeGenerator(TargetExplorer):
                     )
                     self._flush_visualization_images(output_path)
 
-                if max([len(i.all_frontiers) for i in self._gt_traj]) < 2:
+                if (
+                    not self._gt_traj
+                    or max([len(i.all_frontiers) for i in self._gt_traj]) < 2
+                ):
                     print("Only one frontier or less at each timestep!")
                     task.is_stop_called = True
                     return ActionIDs.STOP
@@ -748,6 +917,11 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             # Draw the shortest path to the closest goal in green
             sp = np.array(self._valid_path.points)
             self._draw_path(vis, sp, color=(0, 255, 0))
+            for i, j in self._all_frontier_paths:
+                i_p = np.array(i.points)
+                j_p = np.array(j.points)
+                self._draw_path(vis, i_p, color=(255, 0, 0))
+                self._draw_path(vis, j_p, color=(0, 0, 255))
 
         valid_greedy_frontier_exists = (
             not self._is_exploring
@@ -785,7 +959,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
                 vis == np.array([255, 255, 255], dtype=vis.dtype), axis=2
             )
             for t_step in curr_state.all_frontiers:
-                if t_step == curr_state.correct_frontier:  # green
+                if t_step == curr_state.correct_frontier:  # magenta
                     color = np.array([255, 216, 255], dtype=vis.dtype)
                 else:  # orange
                     color = np.array([182, 238, 255], dtype=vis.dtype)
@@ -882,6 +1056,8 @@ class GTTrajectoryState:
     correct_frontier: int
     correct_frontier_unscored: int
     single_fog_of_war: np.ndarray
+    distance_to_goal: float
+    frontier_dtgs: Dict[str, Dict[int, float]] = field(default_factory=dict)
 
     def to_frontier_dict(self) -> Dict:
         return {

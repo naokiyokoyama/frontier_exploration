@@ -359,11 +359,17 @@ class GreedyExplorerMixin:
             f_seg_2d_dense, sp_2d_interp, dist_thresh=0.75, adaptive=adaptive
         )
 
-        assert (
-            min_idx is not None
-        ), f"No closest frontier found: {self._scene_id}_{self._episode.episode_id}"
+        if min_idx is None:
+            print(
+                f"No closest frontier found: {self._scene_id}_{self._episode.episode_id}"
+            )
+            raise TargetFrontierException
 
         return min_idx
+
+
+class TargetFrontierException(Exception):
+    pass
 
 
 def filter_duplicate_rows(array1, array2):
