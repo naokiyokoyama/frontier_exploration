@@ -49,6 +49,9 @@ def get_action(
         camera_pos[0] - max_line_len : camera_pos[0] + max_line_len,
         camera_pos[1] - max_line_len : camera_pos[1] + max_line_len,
     ]
+    if cropped_obstacle_map.size == 0:
+        return None
+
     all_fogs = [
         cv2.erode(
             reveal_fog_of_war(
