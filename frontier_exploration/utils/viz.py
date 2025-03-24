@@ -4,8 +4,11 @@ import cv2
 import numpy as np
 
 
-def add_translucent_green_border(
-    image: np.ndarray, thickness: int = 10, opacity: float = 0.5
+def add_translucent_border(
+    image: np.ndarray,
+    thickness: int = 10,
+    opacity: float = 0.5,
+    color: Tuple[int, int, int] = (0, 255, 0),
 ) -> np.ndarray:
     """
     Adds a translucent green border to the edges of the input image.
@@ -24,9 +27,6 @@ def add_translucent_green_border(
     # Create a copy of the image to avoid modifying the original
     bordered_image = image.copy()
 
-    # Define the green color in BGR format
-    green_color = (0, 255, 0)
-
     # Create a border mask with the same shape as the image
     border_mask = np.zeros_like(bordered_image, dtype=np.uint8)
 
@@ -35,7 +35,7 @@ def add_translucent_green_border(
         border_mask,
         (0, 0),
         (bordered_image.shape[1], bordered_image.shape[0]),
-        green_color,
+        color,
         thickness,
     )
 
@@ -441,26 +441,30 @@ def rotate_image_orientation(
     return image.copy()
 
 
-def place_image_on_white(
-    img: np.ndarray, target_height: int, target_width: int
+def place_image_centered(
+    img: np.ndarray,
+    target_height: int,
+    target_width: int,
+    bg_color: tuple = (255, 255, 255),  # Default is white (BGR format)
 ) -> np.ndarray:
     """
-    Places an input image in the top-left corner of a white background while preserving
+    Places an input image centered on a background of specified color while preserving
     aspect ratio.
 
     The function resizes the input image so that its largest dimension matches the
     corresponding target dimension while maintaining aspect ratio. The resized image is
-    then placed in the top-left corner of a white canvas of the specified dimensions.
+    then placed in the center of a canvas of the specified dimensions and color.
 
     Args:
         img: A BGR image as a numpy array with shape (height, width, 3)
         target_height: Desired height of the output image in pixels
         target_width: Desired width of the output image in pixels
+        bg_color: Background color in BGR format as a tuple (B, G, R), defaults to white (255, 255, 255)
 
     Returns:
         A BGR image as a numpy array with shape (target_height, target_width, 3)
-        containing the input image resized and placed in the top-left corner of a white
-        background
+        containing the input image resized and placed in the center of the specified
+        background color
 
     Raises:
         ValueError: If target_height or target_width are not positive integers
@@ -485,13 +489,17 @@ def place_image_on_white(
     # Resize image while maintaining aspect ratio
     resized_img = cv2.resize(img, (new_w, new_h))
 
-    # Create white background
-    white_bg = np.full((target_height, target_width, 3), 255, dtype=np.uint8)
+    # Create background with specified color
+    background = np.full((target_height, target_width, 3), bg_color, dtype=np.uint8)
 
-    # Place resized image in top-left corner
-    white_bg[:new_h, :new_w] = resized_img
+    # Calculate position to place the image centered
+    y_offset = (target_height - new_h) // 2
+    x_offset = (target_width - new_w) // 2
 
-    return white_bg
+    # Place resized image in the center
+    background[y_offset : y_offset + new_h, x_offset : x_offset + new_w] = resized_img
+
+    return background
 
 
 def pad_images_to_max_dim(
@@ -596,3 +604,43 @@ def get_mask_except_nearest_contour(
     cv2.drawContours(final_mask, [nearest_contour], -1, 0, -1)
 
     return final_mask.astype(bool)
+
+
+def apply_color_mask(
+    image: np.ndarray, mask: np.ndarray, color: Tuple[int, int, int], opacity: float
+) -> np.ndarray:
+    """
+    Apply a colored overlay to regions of an image defined by a binary mask.
+
+    Args:
+        image (np.ndarray): Input BGR image
+        mask (np.ndarray): Binary mask (same height and width as image)
+                          where non-zero values indicate regions to color
+        color (Tuple[int, int, int]): BGR color tuple (B, G, R) with integer values
+                                     0-255
+        opacity (float): Opacity of the color overlay, between 0.0 and 1.0
+                        where 0.0 is fully transparent and 1.0 is fully opaque
+
+    Returns:
+        np.ndarray: BGR image with color overlay applied to masked regions
+    """
+    # Ensure mask is binary and same shape as image
+    if mask.shape[:2] != image.shape[:2]:
+        raise ValueError("Mask and image must have the same height and width")
+
+    # Convert mask to binary if it isn't already
+    binary_mask = (mask > 0).astype(np.uint8)
+
+    # Create a color overlay image of the same size as the input image
+    color_overlay = np.zeros_like(image)
+
+    # Fill the overlay with the specified color where the mask is True
+    color_overlay[binary_mask > 0] = color
+
+    # Apply alpha blending: result = (1-opacity)*original + opacity*overlay
+    result = cv2.addWeighted(image, 1 - opacity, color_overlay, opacity, 0)
+
+    # Preserve original image outside mask
+    result[mask == 0] = image[mask == 0]
+
+    return result

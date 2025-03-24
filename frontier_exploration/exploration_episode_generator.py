@@ -40,10 +40,10 @@ from frontier_exploration.utils.general_utils import (
 from frontier_exploration.utils.path_utils import get_path
 from frontier_exploration.utils.viz import (
     add_text_to_image,
-    add_translucent_green_border,
+    add_translucent_border,
     get_mask_except_nearest_contour,
     pad_images_to_max_dim,
-    place_image_on_white,
+    place_image_centered,
     resize_image_maintain_ratio,
     rotate_image_orientation,
     tile_images,
@@ -1012,13 +1012,13 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             for t_step in curr_state.all_frontiers:
                 f_img = cv2.cvtColor(self._gt_traj[t_step].rgb, cv2.COLOR_RGB2BGR)
                 if t_step == curr_state.correct_frontier:
-                    f_img = add_translucent_green_border(f_img, thickness=80)
+                    f_img = add_translucent_border(f_img, thickness=80)
                 f_imgs.append(f_img)
 
             f_imgs_h, f_imgs_w = vis.shape[0] - rgb.shape[0], rgb.shape[1]
             if f_imgs:
                 f_stacked = tile_images(np.array(f_imgs), max_width=4)
-                f_imgs_final = place_image_on_white(f_stacked, f_imgs_h, f_imgs_w)
+                f_imgs_final = place_image_centered(f_stacked, f_imgs_h, f_imgs_w)
             else:
                 f_imgs_final = np.full((f_imgs_h, f_imgs_w, 3), 255, dtype=np.uint8)
 

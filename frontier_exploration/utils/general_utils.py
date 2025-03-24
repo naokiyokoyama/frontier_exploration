@@ -1,6 +1,14 @@
+from typing import List, Tuple, Union
+
 import cv2
 import numpy as np
+import quaternion as qt
+from habitat.tasks.utils import cartesian_to_polar
+from habitat.utils.geometry_utils import (
+    quaternion_rotate_vector,
+)
 from numba import njit
+from numpy.lib.stride_tricks import as_strided
 
 
 @njit
@@ -161,3 +169,146 @@ def calculate_perpendicularity(p1: np.ndarray, line_pairs: np.ndarray) -> np.nda
 
     # Return normalized absolute dot products
     return np.abs(dot_products / (v1_norms * v2_norms))
+
+
+def polar_angle_to_quaternion(phi: float) -> qt.quaternion:
+    """
+    Converts a polar angle (phi) back to a quaternion.
+
+    This function is the inverse of get_polar_angle(). It creates a quaternion
+    that represents a rotation around the y-axis such that when processed by
+    get_polar_angle(), it will return the original phi.
+
+    Args:
+        phi: The polar angle in radians
+
+    Returns:
+        quaternion.quaternion: A quaternion representing the rotation
+    """
+    # Based on our analysis, there's a π difference between the input angle
+    # and the angle returned by get_polar_angle. We need to adjust for this.
+    adjusted_angle = phi + np.pi
+
+    # Now create the quaternion for a rotation around the y-axis
+    half_angle = adjusted_angle / 2
+
+    # Create quaternion in format [w, x, y, z]
+    w = np.cos(half_angle)
+    x = 0
+    y = np.sin(half_angle)
+    z = 0
+
+    # Return in quaternion format required by the library
+    return qt.quaternion(w, x, y, z)
+
+
+def get_polar_angle(rotation: np.ndarray) -> float:
+    # quaternion is in x, y, z, w format
+    ref_rotation = rotation
+    heading_vector = quaternion_rotate_vector(
+        ref_rotation.inverse(), np.array([0, 0, -1])  # noqa
+    )
+    phi = cartesian_to_polar(heading_vector[2], -heading_vector[0])[1]
+    return float(phi)
+
+
+def calculate_angle(p1: np.ndarray, p2: np.ndarray, p3: np.ndarray) -> float:
+    """
+    Calculate the angle formed by three 2D points where p2 is the vertex.
+
+    This function computes the angle in radians between vectors p1-p2 and p3-p2,
+    where p2 is the vertex of the angle. The calculation uses the dot product
+    formula to determine the angle.
+
+    Args:
+        p1: The first point as a numpy array of shape (2,)
+        p2: The vertex point as a numpy array of shape (2,)
+        p3: The third point as a numpy array of shape (2,)
+
+    Returns:
+        float: The angle in radians between the vectors
+    """
+    # Calculate vectors from the vertex to the other points
+    v1 = p1 - p2
+    v2 = p3 - p2
+
+    # Calculate the angle using the dot product formula
+    # cos(θ) = (v1 · v2) / (|v1| * |v2|)
+    dot_product = np.dot(v1, v2)
+    magnitude_v1 = np.linalg.norm(v1)
+    magnitude_v2 = np.linalg.norm(v2)
+
+    # Handle potential division by zero
+    if magnitude_v1 == 0 or magnitude_v2 == 0:
+        return 0.0
+
+    # Calculate cosine of the angle, ensuring it's within valid range [-1, 1]
+    cos_angle = np.clip(dot_product / (magnitude_v1 * magnitude_v2), -1.0, 1.0)
+
+    # Return the angle in radians
+    return np.arccos(cos_angle)
+
+
+def sliding_window_strided(arr: np.ndarray, k: int) -> np.ndarray:
+    """
+    Create a sliding window view of a 2D array using stride_tricks.
+
+    Args:
+        arr (np.ndarray): Input array of shape (N, M)
+        k (int): Window size, must be less than N
+
+    Returns:
+        np.ndarray: Array of shape (X, K, M) where X = N - K + 1
+    """
+    n, m = arr.shape
+    s0, s1 = arr.strides
+    x = n - k + 1
+
+    return as_strided(arr, shape=(x, k, m), strides=(s0, s0, s1), writeable=False)
+
+
+def compress_int_list(nums: List[int]) -> Tuple[Union[Tuple[int, int], int], ...]:
+    """
+    Compresses a sorted list of unique integers into a tuple of ranges and individual
+    values.
+
+    Args:
+        nums: A list of unique integers
+
+    Returns:
+        A tuple where each element is either:
+        - A tuple (i, j) representing a consecutive range from i to j (inclusive)
+        - An integer representing a single value
+    """
+    assert len(nums) == len(set(nums))
+    if not nums:
+        return tuple()
+
+    nums = sorted(nums)
+
+    result = []
+    start = nums[0]
+    end = nums[0]
+
+    for i in range(1, len(nums)):
+        if nums[i] == end + 1:
+            # Extend the current range
+            end = nums[i]
+        else:
+            # Add the previous range or individual element
+            if start == end:
+                result.append(start)
+            else:
+                result.append((start, end))
+
+            # Start a new range
+            start = nums[i]
+            end = nums[i]
+
+    # Add the last range or individual element
+    if start == end:
+        result.append(start)
+    else:
+        result.append((start, end))
+
+    return tuple(result)

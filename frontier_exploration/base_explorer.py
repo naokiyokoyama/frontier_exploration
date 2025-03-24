@@ -10,16 +10,13 @@ from gym import Space, spaces
 from habitat import EmbodiedTask, Sensor, SensorTypes, registry
 from habitat.config.default_structured_configs import LabSensorConfig
 from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
-from habitat.tasks.utils import cartesian_to_polar
-from habitat.utils.geometry_utils import (
-    quaternion_rotate_vector,
-)
 from habitat.utils.visualizations import maps
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig
 
 from frontier_exploration.frontier_detection import detect_frontier_waypoints
 from frontier_exploration.utils.fog_of_war import reveal_fog_of_war
+from frontier_exploration.utils.general_utils import get_polar_angle
 from frontier_exploration.utils.path_utils import (
     a_star_search,
     completion_time_heuristic,
@@ -466,16 +463,6 @@ def determine_pointturn_action(
     elif heading_err < -turn_angle:
         return ActionIDs.TURN_LEFT
     return ActionIDs.MOVE_FORWARD
-
-
-def get_polar_angle(rotation: np.ndarray) -> np.ndarray:
-    # quaternion is in x, y, z, w format
-    ref_rotation = rotation
-    heading_vector = quaternion_rotate_vector(
-        ref_rotation.inverse(), np.array([0, 0, -1])  # noqa
-    )
-    phi = cartesian_to_polar(heading_vector[2], -heading_vector[0])[1]
-    return np.array(phi)
 
 
 @dataclass
