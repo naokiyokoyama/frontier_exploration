@@ -722,6 +722,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             "exploration_poses": self._exploration_poses,
             "distance_to_goal": [s.distance_to_goal for s in self._gt_traj],
             "frontier_dtgs": [s.frontier_dtgs for s in self._gt_traj],
+            "gt_poses": [s.pose for s in self._gt_traj],
             **frontiers,
         }
 
