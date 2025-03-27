@@ -288,7 +288,7 @@ if __name__ == "__main__":
 
     sim = create_simulator(args.scene_path)
     print("Simulator created")
-    d: habitat_sim.simulator.Sensor = sim._sensors["depth_sensor"]
+    d: habitat_sim.simulator.Sensor = sim._sensors["rgb_sensor"]
     print(float(d._spec.hfov))
     print(type(d._spec.hfov))
     sim.close()

@@ -168,7 +168,7 @@ def calculate_perpendicularity(p1: np.ndarray, line_pairs: np.ndarray) -> np.nda
     v2_norms = np.linalg.norm(v2, axis=1)  # Shape: (N,)
 
     # Return normalized absolute dot products
-    return np.abs(dot_products / (v1_norms * v2_norms))
+    return np.abs(dot_products / (v1_norms * v2_norms + 1e-10))
 
 
 def polar_angle_to_quaternion(phi: float) -> qt.quaternion:
