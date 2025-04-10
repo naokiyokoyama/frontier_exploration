@@ -206,6 +206,9 @@ class FrontierExplorationMap(TopDownMap):
                 if path.exists():
                     path.touch()
 
+                if "POLICY_FLAG_PATH" in os.environ:
+                    Path(os.environ["POLICY_FLAG_PATH"]).touch()
+
             if "SLURM_JOBID" in os.environ:
                 path = Path(f"/tmp/zsos_{os.environ['SLURM_JOBID']}.dummy")
                 path.touch()

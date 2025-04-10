@@ -306,9 +306,9 @@ def find_new_episodes(input_dirs):
     Find all episode directories that have not been processed yet
     """
     new_episodes = []
-    for input_dir in input_dirs:
+    for input_dir in tqdm.tqdm(input_dirs):
         episodes = glob.glob(input_dir + "/**/episode_*/", recursive=True)
-        for episode_dir in episodes:
+        for episode_dir in tqdm.tqdm(episodes):
             # Skip already completed or in-progress episodes
             if episode_dir in PROCESSED_EPISODES or check_episode_dir_completed(
                 episode_dir

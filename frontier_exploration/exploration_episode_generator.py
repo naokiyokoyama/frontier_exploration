@@ -191,7 +191,9 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             print(f"Episode {self._scene_id} {episode.episode_id} succeeded!!")
 
         self._bad_episode = False
-        self._start_z = self._sim.get_agent_state().position[1]
+        # Explicitly convert from numpy.float64 to float to avoid JSON serialization
+        # issues
+        self._start_z = self._sim.get_agent_state().position[1].item()
 
         print(f"Starting episode {episode.episode_id} in scene {self._scene_id}")
 
@@ -715,6 +717,13 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         assert len(self._exploration_poses) == len(self._exploration_imgs), (
             f"{len(self._exploration_poses)=} " f"{len(self._exploration_imgs)=}"
         )
+
+        # Save info to be able to map 3D points back to 2D
+        lower_bound, upper_bound = self._sim.pathfinder.get_bounds()
+        grid_size = (
+            abs(upper_bound[2] - lower_bound[2]) / self.top_down_map.shape[0],
+            abs(upper_bound[0] - lower_bound[0]) / self.top_down_map.shape[1],
+        )
         json_data = {
             "episode_id": self._episode.episode_id,
             "scene_id": self._scene_id,
@@ -723,6 +732,9 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             "distance_to_goal": [s.distance_to_goal for s in self._gt_traj],
             "frontier_dtgs": [s.frontier_dtgs for s in self._gt_traj],
             "gt_poses": [s.pose for s in self._gt_traj],
+            "lower_bound": [float(i) for i in lower_bound],
+            "grid_size": [float(i) for i in grid_size],
+            "start_z": self._start_z,
             **frontiers,
         }
 
@@ -731,7 +743,8 @@ class ExplorationEpisodeGenerator(TargetExplorer):
 
         with open(episode_json, "w") as f:
             print("Saving episode to:", episode_json)
-            json.dump(json_data, f)
+            json.dump(json_data, f, indent=2)
+            f.flush()
 
     def _flush_visualization_images(self, output_path: str) -> None:
         print(f"Writing visualization images to video at {output_path}...")
