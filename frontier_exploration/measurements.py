@@ -71,6 +71,9 @@ class FrontierExplorationMap(TopDownMap):
         self._explorer_sensor = kwargs["task"].sensor_suite.sensors[self._explorer_uuid]
         self._static_metrics = {}
         super().reset_metric(episode, *args, **kwargs)
+        if self._metric is None:  # v0.2.3 doesn't update self._metric in reset_metric
+            self.update_metric(episode, None)
+        
         self._draw_target_bbox_mask(episode)
 
         # Expose sufficient info for drawing 3D points on the map
