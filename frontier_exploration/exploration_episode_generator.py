@@ -100,6 +100,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         self._unique_episodes_only = config.unique_episodes_only
         self._task_type = config.task_type
         self._stop_at_beelining: bool = config.stop_at_beelining
+        self._save_as_video: bool = config.save_as_video
         assert config.task_type in ["objectnav", "imagenav"]
 
         self._is_exploring: bool = False
@@ -218,9 +219,11 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         self._bad_idx_to_good_idx = result.filtered.bad_idx_to_good_idx
 
         correct_frontier, correct_frontier_unscored = [
-            i.good_indices_to_timestep[gt_idx]
-            if len(self._frontier_segments) > 0
-            else -1
+            (
+                i.good_indices_to_timestep[gt_idx]
+                if len(self._frontier_segments) > 0
+                else -1
+            )
             for i in (result.filtered, result.unscored_filtered)
         ]
 
@@ -629,9 +632,15 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             # No frontier sets with enough frontiers were found
             return
 
-        self._save_rgbs_to_video(
-            [i.rgb for i in self._gt_traj], osp.join(self._episode_dir, "gt_traj.mp4")
-        )
+        if self._save_as_video:
+            self._save_rgbs_to_video(
+                [i.rgb for i in self._gt_traj],
+                osp.join(self._episode_dir, "gt_traj.mp4"),
+            )
+        else:
+            self._save_rgbs_to_dir(
+                [i.rgb for i in self._gt_traj], osp.join(self._episode_dir, "gt_traj")
+            )
         self._save_frontier_fogs(self._episode_dir)
         if self._task_type == "imagenav":
             self._save_imagenav_goal(self._episode_dir)
@@ -640,9 +649,15 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         exploration_imgs_dir = osp.join(
             self._episode_dir, f"exploration_imgs_{exploration_id}"
         )
-        self._save_rgbs_to_video(
-            self._exploration_imgs, osp.join(exploration_imgs_dir, "exploration.mp4")
-        )
+        if self._save_as_video:
+            self._save_rgbs_to_video(
+                self._exploration_imgs,
+                osp.join(exploration_imgs_dir, "exploration.mp4"),
+            )
+        else:
+            self._save_rgbs_to_dir(
+                self._exploration_imgs, osp.join(exploration_imgs_dir, "exploration")
+            )
         self._save_exploration_fogs(exploration_imgs_dir)
 
         episode_json = osp.join(self._episode_dir, f"exploration_{exploration_id}.json")
@@ -674,6 +689,25 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             os.makedirs(parent_dir, exist_ok=True)
         bgr = [cv2.cvtColor(i, cv2.COLOR_RGB2BGR) for i in rgbs]
         images_to_video(bgr, output_path)
+
+    @staticmethod
+    def _save_rgbs_to_dir(rgbs: list[np.ndarray], output_path: str) -> None:
+        """
+        Save RGB images as individual JPG files in a directory.
+
+        Args:
+            rgbs: List of RGB images as numpy arrays
+            output_path: Path to the output directory (e.g., 'gt_traj/')
+        """
+        if not osp.exists(output_path):
+            os.makedirs(output_path, exist_ok=True)
+
+        for idx, rgb in enumerate(rgbs):
+            # Format index with 4 digits, left-padded with zeros
+            filename = f"{idx:04d}.jpg"
+            filepath = osp.join(output_path, filename)
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(filepath, bgr)
 
     def _save_exploration_fogs(self, dir_path: str) -> None:
         self._save_fogs(self._exploration_fogs, dir_path, "exploration")
@@ -1169,6 +1203,7 @@ class ExplorationEpisodeGeneratorConfig(TargetExplorerSensorConfig):
     stop_at_beelining: bool = True
     no_flip_flopping: bool = True
     meters_per_pixel: float = 1.0 / 17.0
+    save_as_video: bool = True  # If True, save as video; if False, save as JPG files
 
 
 cs = ConfigStore.instance()
