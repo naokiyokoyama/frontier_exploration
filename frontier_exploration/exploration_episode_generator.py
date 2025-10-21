@@ -101,6 +101,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         self._task_type = config.task_type
         self._stop_at_beelining: bool = config.stop_at_beelining
         self._save_as_video: bool = config.save_as_video
+        self._no_exploration: bool = config.no_exploration
         assert config.task_type in ["objectnav", "imagenav"]
 
         self._is_exploring: bool = False
@@ -118,7 +119,6 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         self._gt_fog_of_war_mask: np.ndarray = np.empty((1, 1))  # 2D array
         self._latest_fog: np.ndarray = np.empty((1, 1))  # 2D array
         self._gt_traj: List[GTTrajectoryState] = []
-        self._exploration_successful: bool = False
         self._start_z: float = -1.0
         self._step_count: int = 0
         self._timestep_to_greedy_idx: Dict[int, int] = {}
@@ -158,7 +158,6 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         self._gt_traj = []
         self._exploration_poses = []
         self._exploration_imgs = []
-        self._exploration_successful = False
         self._coverage_masks = []
         self._step_count = 0
         self._timestep_to_greedy_idx = {}
@@ -588,7 +587,6 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         self.fog_of_war_mask = np.zeros_like(self.top_down_map)
         self._agent_position = None
         self._agent_heading = None
-        self._exploration_successful = False
         self._first_frontier = False
         self._minimize_time = True
         self._viz_imgs = []
@@ -649,16 +647,18 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         exploration_imgs_dir = osp.join(
             self._episode_dir, f"exploration_imgs_{exploration_id}"
         )
-        if self._save_as_video:
-            self._save_rgbs_to_video(
-                self._exploration_imgs,
-                osp.join(exploration_imgs_dir, "exploration.mp4"),
-            )
-        else:
-            self._save_rgbs_to_dir(
-                self._exploration_imgs, osp.join(exploration_imgs_dir, "exploration")
-            )
-        self._save_exploration_fogs(exploration_imgs_dir)
+        if not self._no_exploration:
+            if self._save_as_video:
+                self._save_rgbs_to_video(
+                    self._exploration_imgs,
+                    osp.join(exploration_imgs_dir, "exploration.mp4"),
+                )
+            else:
+                self._save_rgbs_to_dir(
+                    self._exploration_imgs,
+                    osp.join(exploration_imgs_dir, "exploration"),
+                )
+            self._save_exploration_fogs(exploration_imgs_dir)
 
         episode_json = osp.join(self._episode_dir, f"exploration_{exploration_id}.json")
         self._save_episode_json(frontiers, exploration_imgs_dir, episode_json)
@@ -747,10 +747,10 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             episode_json (str): The path to the JSON file to save the episode
                 information.
         """
-
-        assert len(self._exploration_poses) == len(self._exploration_imgs), (
-            f"{len(self._exploration_poses)=} " f"{len(self._exploration_imgs)=}"
-        )
+        if not self._no_exploration:
+            assert len(self._exploration_poses) == len(self._exploration_imgs), (
+                f"{len(self._exploration_poses)=} " f"{len(self._exploration_imgs)=}"
+            )
 
         # Save info to be able to map 3D points back to 2D
         lower_bound, upper_bound = self._sim.pathfinder.get_bounds()
@@ -761,8 +761,6 @@ class ExplorationEpisodeGenerator(TargetExplorer):
         json_data = {
             "episode_id": self._episode.episode_id,
             "scene_id": self._scene_id,
-            "exploration_id": int(osp.basename(exploration_imgs_dir).split("_")[-1]),
-            "exploration_poses": self._exploration_poses,
             "distance_to_goal": [s.distance_to_goal for s in self._gt_traj],
             "frontier_dtgs": [s.frontier_dtgs for s in self._gt_traj],
             "gt_poses": [s.pose for s in self._gt_traj],
@@ -771,6 +769,11 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             "start_z": self._start_z,
             **frontiers,
         }
+        if not self._no_exploration:
+            json_data["exploration_id"] = int(
+                osp.basename(exploration_imgs_dir).split("_")[-1]
+            )
+            json_data["exploration_poses"] = self._exploration_poses
 
         if self._task_type == "objectnav":
             json_data["object_category"] = self._episode.object_category
@@ -912,6 +915,11 @@ class ExplorationEpisodeGenerator(TargetExplorer):
                 self._gt_fog_of_war_mask = self.fog_of_war_mask.copy()
                 print("Ground truth path completed! Resetting exploration.")
 
+                if self._no_exploration:
+                    self._save_to_dataset()
+                    task.is_stop_called = True
+                    return ActionIDs.STOP
+
                 # Reset the exploration
                 success = self._reset_exploration()
                 if "SAVE_VIZ" in os.environ:
@@ -932,13 +940,13 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             if np.array_equal(action, ActionIDs.STOP):
                 # - The length of self._exploration_poses must be within the valid range
                 # - The coverage of the exploration must be within the valid range
-                self._exploration_successful = (
+                exploration_successful = (
                     self._min_exploration_steps
                     <= len(self._exploration_poses)
                     <= self._max_exploration_steps + 1
                 )
 
-                if self._exploration_successful:
+                if exploration_successful:
                     print("Exploration successful!")
                     # Save the exploration data to disk
                     self._save_to_dataset()
@@ -1204,6 +1212,7 @@ class ExplorationEpisodeGeneratorConfig(TargetExplorerSensorConfig):
     no_flip_flopping: bool = True
     meters_per_pixel: float = 1.0 / 17.0
     save_as_video: bool = True  # If True, save as video; if False, save as JPG files
+    no_exploration: bool = False  # If True, skip the exploration phase
 
 
 cs = ConfigStore.instance()
