@@ -605,6 +605,7 @@ class ExplorationEpisodeGenerator(TargetExplorer):
             msg = f"Finished {curr_num_episodes + 1} of {num_episodes} episodes"
             if curr_num_episodes >= num_episodes:
                 print("Reached the desired number of episodes. Stopping...")
+                open(f"{self._dataset_path}/.{self._scene_id}.done", "w").close()
                 import sys
 
                 sys.exit(0)
